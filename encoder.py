@@ -1,4 +1,4 @@
-import os, sys, time, asyncio, json, base64
+import os, sys, time, asyncio, json, base64, shutil
 import pyrogram.utils
 
 def patched_get_peer_type(peer_id: int) -> str:
@@ -36,9 +36,11 @@ if ":::" in raw_dump:
     if len(parts) > 3: RESOLUTION = parts[3]
     if len(parts) > 4:
         try: 
-            # FIX: Base64 decode to prevent JSON string breaking the bash action!
+            # 100% Unbreakable Base64 Decoding
             b64_str = parts[4]
-            USER_SETTINGS = json.loads(base64.b64decode(b64_str).decode('utf-8'))
+            pad = len(b64_str) % 4
+            if pad: b64_str += "=" * (4 - pad)
+            USER_SETTINGS = json.loads(base64.urlsafe_b64decode(b64_str).decode('utf-8'))
         except Exception as e: 
             print("Failed to decode settings:", e)
 else:
@@ -106,65 +108,76 @@ async def download_phase():
         status_msg = await app.send_message(CHAT_ID, f"⚙️ Worker Triggered: Preparing...\n📦 File: `{RENAME}`", reply_markup=cancel_kb)
         msg_id = status_msg.id
     
-    # FIX 2: Download raw paths, then dynamically safe-rename to remove ALL special characters like '[' ']' from file names!
+    # SAFEST Renaming to Avoid FFmpeg Crashes on Special Characters!
     orig_vid = await app.download_media(VIDEO_ID, progress=progress_bar, progress_args=(app, msg_id, "📥 Downloading Video"))
+    if not orig_vid:
+        await app.edit_message_text(CHAT_ID, msg_id, "❌ **Error:** Failed to download video from Telegram.")
+        await app.stop()
+        return None, None, None, msg_id
+        
     ext = os.path.splitext(orig_vid)[1]
-    video_path = os.path.join(os.path.dirname(orig_vid), f"safe_vid{ext}")
-    os.rename(orig_vid, video_path)
+    video_path = f"safe_vid{ext}"
+    if os.path.exists(video_path): os.remove(video_path)
+    shutil.move(orig_vid, video_path)
 
     sub_path = None
     if TASK_TYPE == "hardsub" and SUB_ID != "none":
         orig_sub = await app.download_media(SUB_ID, progress=progress_bar, progress_args=(app, msg_id, "📥 Downloading Subtitle"))
-        ext = os.path.splitext(orig_sub)[1]
-        sub_path = os.path.join(os.path.dirname(orig_sub), f"safe_sub{ext}")
-        os.rename(orig_sub, sub_path)
-        
+        if orig_sub:
+            ext = os.path.splitext(orig_sub)[1]
+            sub_path = f"safe_sub{ext}"
+            if os.path.exists(sub_path): os.remove(sub_path)
+            shutil.move(orig_sub, sub_path)
+            
     logo_path = None
     if TASK_TYPE == "hardsub" and LOGO_ID != "none":
         orig_logo = await app.download_media(LOGO_ID, progress=progress_bar, progress_args=(app, msg_id, "📥 Downloading Logo"))
-        ext = os.path.splitext(orig_logo)[1]
-        logo_path = os.path.join(os.path.dirname(orig_logo), f"safe_logo{ext}")
-        os.rename(orig_logo, logo_path)
-        
+        if orig_logo:
+            ext = os.path.splitext(orig_logo)[1]
+            logo_path = f"safe_logo{ext}"
+            if os.path.exists(logo_path): os.remove(logo_path)
+            shutil.move(orig_logo, logo_path)
+            
     await app.edit_message_text(CHAT_ID, msg_id, f"🔥 Starting FFmpeg Engine...\n📦 File: `{RENAME}`\n*(Connection Paused for Safety)*", reply_markup=cancel_kb)
     await app.stop() 
     return video_path, sub_path, logo_path, msg_id
 
 async def encode_phase(video_path, sub_path, logo_path, msg_id):
+    if not video_path: return None, 1
     output = RENAME
     duration = await get_duration(video_path)
     os.makedirs("fonts", exist_ok=True)
     
-    crf = USER_SETTINGS.get('crf', '22')
-    preset = USER_SETTINGS.get('preset', 'slow')
-    codec = USER_SETTINGS.get('codec', 'libx264')
-    audiocodec = USER_SETTINGS.get('audiocodec', 'copy')
+    # Safe Defaults & Parsing
+    crf = USER_SETTINGS.get('crf') or '22'
+    preset = USER_SETTINGS.get('preset') or 'slow'
+    codec = USER_SETTINGS.get('codec') or 'libx264'
+    audiocodec = USER_SETTINGS.get('audiocodec') or 'copy'
     audio_bitrate = USER_SETTINGS.get('audio')
     tune = USER_SETTINGS.get('tune')
     bit_depth = USER_SETTINGS.get('bit')
     fps = USER_SETTINGS.get('fps')
     
-    if " " in str(crf): crf = str(crf).split()[0]
-    if " " in str(preset): preset = str(preset).split()[0]
-    if " " in str(codec): codec = str(codec).split()[0]
-    if " " in str(audiocodec): audiocodec = str(audiocodec).split()[0]
-    if " " in str(bit_depth): bit_depth = str(bit_depth).split()[0]
+    crf = str(crf).split()[0]
+    preset = str(preset).split()[0]
+    codec = str(codec).split()[0]
+    audiocodec = str(audiocodec).split()[0]
     
     v_args = ['-c:v', codec, '-preset', preset]
     if codec != 'copy':
-        v_args.extend(['-crf', str(crf)])
-        if tune and tune != "None": v_args.extend(['-tune', tune])
-        if bit_depth == '10bit': v_args.extend(['-pix_fmt', 'yuv420p10le'])
-        elif bit_depth == '8bit': v_args.extend(['-pix_fmt', 'yuv420p'])
-        if fps and fps != "Original": v_args.extend(['-r', str(fps)])
+        v_args.extend(['-crf', crf])
+        if tune and tune != "None": v_args.extend(['-tune', str(tune).split()[0]])
+        if bit_depth and '10bit' in str(bit_depth): v_args.extend(['-pix_fmt', 'yuv420p10le'])
+        elif bit_depth and '8bit' in str(bit_depth): v_args.extend(['-pix_fmt', 'yuv420p'])
+        if fps and fps != "Original": v_args.extend(['-r', str(fps).split()[0]])
         
     a_args = ['-c:a', audiocodec]
     if audio_bitrate and audiocodec != 'copy':
-        a_args.extend(['-b:a', str(audio_bitrate)])
+        a_args.extend(['-b:a', str(audio_bitrate).split()[0]])
     
     if TASK_TYPE == "hardsub":
-        # Using safely renamed base files
-        sub_filter = f"subtitles='{os.path.basename(sub_path)}':fontsdir='fonts'" if sub_path else ""
+        # Guaranteed no special characters in path
+        sub_filter = f"subtitles='{sub_path}':fontsdir='fonts'" if sub_path else ""
 
         if logo_path:
             scale_val = "120:-1"
@@ -244,6 +257,7 @@ async def extract_thumbnail(video_path, thumb_path):
     return os.path.exists(thumb_path)
 
 async def upload_phase(output, returncode, msg_id):
+    if not output or not msg_id: return
     app = Client("worker_up", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
     await app.start()
     
@@ -280,5 +294,6 @@ async def upload_phase(output, returncode, msg_id):
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     vid, sub, logo, mid = loop.run_until_complete(download_phase())
-    out, rcode = loop.run_until_complete(encode_phase(vid, sub, logo, mid))
-    loop.run_until_complete(upload_phase(out, rcode, mid))
+    if vid:
+        out, rcode = loop.run_until_complete(encode_phase(vid, sub, logo, mid))
+        loop.run_until_complete(upload_phase(out, rcode, mid))
