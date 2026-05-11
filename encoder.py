@@ -1,4 +1,4 @@
-import os, sys, time, asyncio, json
+import os, sys, time, asyncio
 import pyrogram.utils
 
 def patched_get_peer_type(peer_id: int) -> str:
@@ -26,7 +26,6 @@ THREAD_ID = os.getenv("THREAD_ID")
 raw_dump = os.getenv("DUMP_ID", "none")
 STATUS_MSG_ID = None
 RESOLUTION = "original"
-USER_SETTINGS = {}
 
 if ":::" in raw_dump:
     parts = raw_dump.split(":::")
@@ -34,9 +33,6 @@ if ":::" in raw_dump:
     LOGO_ID = parts[1]
     if len(parts) > 2: STATUS_MSG_ID = parts[2]
     if len(parts) > 3: RESOLUTION = parts[3]
-    if len(parts) > 4:
-        try: USER_SETTINGS = json.loads(":::".join(parts[4:]))
-        except: pass
 else:
     DUMP_ID = raw_dump
     LOGO_ID = "none"
@@ -102,15 +98,14 @@ async def download_phase():
         status_msg = await app.send_message(CHAT_ID, f"⚙️ Worker Triggered: Preparing...\n📦 File: `{RENAME}`", reply_markup=cancel_kb)
         msg_id = status_msg.id
     
-    # Safe names to prevent FFmpeg filter crashing on special characters
-    video_path = await app.download_media(VIDEO_ID, file_name="input_vid.mkv", progress=progress_bar, progress_args=(app, msg_id, "📥 Downloading Video"))
+    video_path = await app.download_media(VIDEO_ID, file_name="video.mkv", progress=progress_bar, progress_args=(app, msg_id, "📥 Downloading Video"))
     sub_path = None
     if TASK_TYPE == "hardsub" and SUB_ID != "none":
-        sub_path = await app.download_media(SUB_ID, file_name="input_sub.ass", progress=progress_bar, progress_args=(app, msg_id, "📥 Downloading Subtitle"))
+        sub_path = await app.download_media(SUB_ID, progress=progress_bar, progress_args=(app, msg_id, "📥 Downloading Subtitle"))
         
     logo_path = None
     if TASK_TYPE == "hardsub" and LOGO_ID != "none":
-        logo_path = await app.download_media(LOGO_ID, file_name="input_logo.png", progress=progress_bar, progress_args=(app, msg_id, "📥 Downloading Logo"))
+        logo_path = await app.download_media(LOGO_ID, progress=progress_bar, progress_args=(app, msg_id, "📥 Downloading Logo"))
         
     await app.edit_message_text(CHAT_ID, msg_id, f"🔥 Starting FFmpeg Engine...\n📦 File: `{RENAME}`\n*(Connection Paused for Safety)*", reply_markup=cancel_kb)
     await app.stop() 
@@ -121,63 +116,57 @@ async def encode_phase(video_path, sub_path, logo_path, msg_id):
     duration = await get_duration(video_path)
     os.makedirs("fonts", exist_ok=True)
     
-    crf = USER_SETTINGS.get('crf', '22')
-    preset = USER_SETTINGS.get('preset', 'slow')
-    codec = USER_SETTINGS.get('codec', 'libx264')
-    audiocodec = USER_SETTINGS.get('audiocodec', 'copy')
-    audio_bitrate = USER_SETTINGS.get('audio')
-    tune = USER_SETTINGS.get('tune')
-    bit_depth = USER_SETTINGS.get('bit')
-    fps = USER_SETTINGS.get('fps')
-    
-    # Clean default suffixes if they were saved in the DB
-    if " " in str(crf): crf = str(crf).split()[0]
-    if " " in str(preset): preset = str(preset).split()[0]
-    if " " in str(codec): codec = str(codec).split()[0]
-    if " " in str(audiocodec): audiocodec = str(audiocodec).split()[0]
-    if " " in str(bit_depth): bit_depth = str(bit_depth).split()[0]
-    
-    v_args = ['-c:v', codec, '-preset', preset]
-    if codec != 'copy':
-        v_args.extend(['-crf', str(crf)])
-        if tune and tune != "None": v_args.extend(['-tune', tune])
-        if bit_depth == '10bit': v_args.extend(['-pix_fmt', 'yuv420p10le'])
-        elif bit_depth == '8bit': v_args.extend(['-pix_fmt', 'yuv420p'])
-        if fps and fps != "Original": v_args.extend(['-r', str(fps)])
-        
-    a_args = ['-c:a', audiocodec]
-    if audio_bitrate and audiocodec != 'copy':
-        a_args.extend(['-b:a', str(audio_bitrate)])
-    
     if TASK_TYPE == "hardsub":
-        # Because we renamed the files, it's 100% safe to use directly without abs paths
-        sub_filter = f"subtitles='input_sub.ass':fontsdir='fonts'" if sub_path else ""
+        abs_sub = os.path.abspath(sub_path).replace('\\', '/').replace(':', '\\:') if sub_path else ""
+        fonts_dir = os.path.abspath("fonts").replace('\\', '/').replace(':', '\\:')
+        sub_filter = f"subtitles='{abs_sub}':fontsdir='{fonts_dir}'" if abs_sub else ""
 
         if logo_path:
+            abs_logo = os.path.abspath(logo_path).replace('\\', '/').replace(':', '\\:')
             scale_val = "120:-1"
             pos_val = "main_w-overlay_w-15:15"
+            
             filter_complex = f"[1:v]scale={scale_val}[logo];[0:v]{sub_filter}[subbed];[subbed][logo]overlay={pos_val}" if sub_filter else f"[1:v]scale={scale_val}[logo];[0:v][logo]overlay={pos_val}"
-            cmd = ['ffmpeg', '-y', '-i', video_path, '-i', 'input_logo.png', '-filter_complex', filter_complex, '-map', '0:a?', '-sn'] + v_args + a_args + ['-progress', 'pipe:1', output]
+            
+            cmd =[
+                'ffmpeg', '-y', '-i', video_path, '-i', abs_logo,
+                '-filter_complex', filter_complex,
+                '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '34', '-c:a', 'copy',
+                '-progress', 'pipe:1', output
+            ]
         else:
-            if sub_filter:
-                cmd = ['ffmpeg', '-y', '-i', video_path, '-map', '0:v:0', '-map', '0:a?', '-sn', '-vf', sub_filter] + v_args + a_args + ['-progress', 'pipe:1', output]
-            else:
-                cmd = ['ffmpeg', '-y', '-i', video_path, '-map', '0:v:0', '-map', '0:a?', '-sn'] + v_args + a_args + ['-progress', 'pipe:1', output]
+            cmd =[
+                'ffmpeg', '-y', '-i', video_path, '-sn', 
+                '-vf', sub_filter, 
+                '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '34', '-c:a', 'copy',
+                '-progress', 'pipe:1', output
+            ] if sub_filter else[
+                'ffmpeg', '-y', '-i', video_path, '-c:v', 'libx264', '-preset', 'Slow', '-crf', '22', '-c:a', 'copy', '-progress', 'pipe:1', output
+            ]
         engine_name = "HARDSUB ENGINE"
     else:
         if RESOLUTION != "original":
             vf_scale = f"scale=-2:{RESOLUTION}"
-            cmd = ['ffmpeg', '-y', '-i', video_path, '-map', '0:v:0', '-map', '0:a?', '-sn', '-vf', vf_scale] + v_args + a_args + ['-progress', 'pipe:1', output]
+            cmd =[
+                'ffmpeg', '-y', '-i', video_path, 
+                '-map', '0:v', '-map', '0:a?', '-map', '0:s?', 
+                '-vf', vf_scale,
+                '-c:v', 'libx264', '-preset', 'Slow', '-crf', '22', '-c:a', 'copy', '-c:s', 'copy',
+                '-progress', 'pipe:1', output
+            ]
         else:
-            cmd = ['ffmpeg', '-y', '-i', video_path, '-map', '0:v:0', '-map', '0:a?', '-sn'] + v_args + a_args + ['-progress', 'pipe:1', output]
+            cmd =[
+                'ffmpeg', '-y', '-i', video_path, 
+                '-map', '0:v', '-map', '0:a?', '-map', '0:s?', 
+                '-c:v', 'libx264', '-preset', 'Slow', '-crf', '22', '-c:a', 'copy', '-c:s', 'copy',
+                '-progress', 'pipe:1', output
+            ]
         engine_name = "COMPRESSION ENGINE"
 
     app = Client("worker_enc", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
     await app.start()
     
-    with open("ffmpeg_error.log", "w") as err_file:
-        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=err_file)
-        
+    proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
     start_time = time.time()
     last_up = 0
 
@@ -192,27 +181,25 @@ async def encode_phase(video_path, sub_path, logo_path, msg_id):
                 cur = int(time_str) / 1000000
                 now = time.time()
                 
-                # If duration is 0, we still update but show "Processing" instead of %
-                if (now - last_up) > 10:
-                    if duration > 0:
-                        perc = min(100, (cur / duration) * 100)
-                        elapsed = now - start_time
-                        speed = cur / elapsed if elapsed > 0 else 0
-                        eta = (duration - cur) / speed if speed > 0 else 0
-                        bar_length = 14
-                        filled = int((perc / 100) * bar_length)
-                        bar = "▓" * filled + "░" * (bar_length - filled)
-                        prog_text = f"▸ Progress  : {bar}  {perc:.2f}%\n▸ Velocity  : {speed:.2f}x\n▸ Remaining : ~{get_readable_time(eta)}"
-                    else:
-                        prog_text = f"▸ Processed : {get_readable_time(cur)}\n▸ Duration  : Unknown"
-                        
+                if duration > 0 and (now - last_up) > 10:
+                    perc = min(100, (cur / duration) * 100)
+                    elapsed = now - start_time
+                    speed = cur / elapsed if elapsed > 0 else 0
+                    eta = (duration - cur) / speed if speed > 0 else 0
+                    
+                    bar_length = 14
+                    filled = int((perc / 100) * bar_length)
+                    bar = "▓" * filled + "░" * (bar_length - filled)
+                    
                     cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cancel_cloud_task_cloud")]])
                     text = (
                         f"🎬  {engine_name} \n"
                         "──────────────────────────\n"
                         f"📦 File     : `{RENAME}`\n"
                         f"▸ Status    : Processing Frame...\n"
-                        f"{prog_text}\n"
+                        f"▸ Progress  : {bar}  {perc:.2f}%\n"
+                        f"▸ Velocity  : {speed:.2f}x\n"
+                        f"▸ Remaining : ~{get_readable_time(eta)}\n"
                         "──────────────────────────\n"
                         "⚙ GitHub Cloud Worker"
                     )
@@ -257,11 +244,7 @@ async def upload_phase(output, returncode, msg_id):
         except Exception as e:
             await app.edit_message_text(CHAT_ID, msg_id, f"❌ Upload Error: {str(e)}")
     else:
-        err_msg = "Unknown Reason"
-        if os.path.exists("ffmpeg_error.log"):
-            with open("ffmpeg_error.log", "r") as f:
-                err_msg = "".join(f.readlines()[-15:])[-1000:]
-        await app.edit_message_text(CHAT_ID, msg_id, f"❌ **FFmpeg Error:** Failed to Process Video.\n\n**Log:**\n`{err_msg}`")
+        await app.edit_message_text(CHAT_ID, msg_id, f"❌ **FFmpeg Error:** Failed to Process Video.")
     
     await app.stop()
 
