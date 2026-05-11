@@ -1,4 +1,4 @@
-import os, sys, time, asyncio
+import os, sys, time, asyncio, json
 import pyrogram.utils
 
 def patched_get_peer_type(peer_id: int) -> str:
@@ -26,6 +26,7 @@ THREAD_ID = os.getenv("THREAD_ID")
 raw_dump = os.getenv("DUMP_ID", "none")
 STATUS_MSG_ID = None
 RESOLUTION = "original"
+USER_SETTINGS = {}
 
 if ":::" in raw_dump:
     parts = raw_dump.split(":::")
@@ -33,6 +34,9 @@ if ":::" in raw_dump:
     LOGO_ID = parts[1]
     if len(parts) > 2: STATUS_MSG_ID = parts[2]
     if len(parts) > 3: RESOLUTION = parts[3]
+    if len(parts) > 4:
+        try: USER_SETTINGS = json.loads(":::".join(parts[4:]))
+        except: pass
 else:
     DUMP_ID = raw_dump
     LOGO_ID = "none"
@@ -116,6 +120,25 @@ async def encode_phase(video_path, sub_path, logo_path, msg_id):
     duration = await get_duration(video_path)
     os.makedirs("fonts", exist_ok=True)
     
+    crf = USER_SETTINGS.get('crf') or '22'
+    preset = USER_SETTINGS.get('preset') or 'slow'
+    codec = USER_SETTINGS.get('codec') or 'libx264'
+    audiocodec = USER_SETTINGS.get('audiocodec') or 'copy'
+    audio_bitrate = USER_SETTINGS.get('audio')
+    tune = USER_SETTINGS.get('tune')
+    bit_depth = USER_SETTINGS.get('bit')
+    fps = USER_SETTINGS.get('fps')
+    
+    v_args = ['-c:v', codec, '-preset', preset, '-crf', str(crf)]
+    if tune: v_args.extend(['-tune', tune])
+    if bit_depth == '10bit': v_args.extend(['-pix_fmt', 'yuv420p10le'])
+    elif bit_depth == '8bit': v_args.extend(['-pix_fmt', 'yuv420p'])
+    if fps: v_args.extend(['-r', str(fps)])
+    
+    a_args = ['-c:a', audiocodec]
+    if audio_bitrate and audiocodec != 'copy':
+        a_args.extend(['-b:a', str(audio_bitrate)])
+    
     if TASK_TYPE == "hardsub":
         abs_sub = os.path.abspath(sub_path).replace('\\', '/').replace(':', '\\:') if sub_path else ""
         fonts_dir = os.path.abspath("fonts").replace('\\', '/').replace(':', '\\:')
@@ -125,42 +148,21 @@ async def encode_phase(video_path, sub_path, logo_path, msg_id):
             abs_logo = os.path.abspath(logo_path).replace('\\', '/').replace(':', '\\:')
             scale_val = "120:-1"
             pos_val = "main_w-overlay_w-15:15"
-            
             filter_complex = f"[1:v]scale={scale_val}[logo];[0:v]{sub_filter}[subbed];[subbed][logo]overlay={pos_val}" if sub_filter else f"[1:v]scale={scale_val}[logo];[0:v][logo]overlay={pos_val}"
             
-            cmd =[
-                'ffmpeg', '-y', '-i', video_path, '-i', abs_logo,
-                '-filter_complex', filter_complex,
-                '-c:v', 'libx264', '-preset', 'slow', '-crf', '22', '-c:a', 'copy',
-                '-progress', 'pipe:1', output
-            ]
+            cmd = ['ffmpeg', '-y', '-i', video_path, '-i', abs_logo, '-filter_complex', filter_complex, '-map', '0:a?', '-sn'] + v_args + a_args + ['-progress', 'pipe:1', output]
         else:
-            cmd =[
-                'ffmpeg', '-y', '-i', video_path, '-sn', 
-                '-vf', sub_filter, 
-                '-c:v', 'libx264', '-preset', 'slow', '-crf', '22', '-c:a', 'copy',
-                '-progress', 'pipe:1', output
-            ] if sub_filter else[
-                'ffmpeg', '-y', '-i', video_path, '-c:v', 'libx264', '-preset', 'slow', '-crf', '22', '-c:a', 'copy', '-progress', 'pipe:1', output
-            ]
+            if sub_filter:
+                cmd = ['ffmpeg', '-y', '-i', video_path, '-map', '0:v:0', '-map', '0:a?', '-sn', '-vf', sub_filter] + v_args + a_args + ['-progress', 'pipe:1', output]
+            else:
+                cmd = ['ffmpeg', '-y', '-i', video_path, '-map', '0:v:0', '-map', '0:a?', '-sn'] + v_args + a_args + ['-progress', 'pipe:1', output]
         engine_name = "HARDSUB ENGINE"
     else:
         if RESOLUTION != "original":
             vf_scale = f"scale=-2:{RESOLUTION}"
-            cmd =[
-                'ffmpeg', '-y', '-i', video_path, 
-                '-map', '0:v', '-map', '0:a?', '-map', '0:s?', 
-                '-vf', vf_scale,
-                '-c:v', 'libx264', '-preset', 'slow', '-crf', '22', '-c:a', 'copy', '-c:s', 'copy',
-                '-progress', 'pipe:1', output
-            ]
+            cmd = ['ffmpeg', '-y', '-i', video_path, '-map', '0:v:0', '-map', '0:a?', '-sn', '-vf', vf_scale] + v_args + a_args + ['-progress', 'pipe:1', output]
         else:
-            cmd =[
-                'ffmpeg', '-y', '-i', video_path, 
-                '-map', '0:v', '-map', '0:a?', '-map', '0:s?', 
-                '-c:v', 'libx264', '-preset', 'slow', '-crf', '22', '-c:a', 'copy', '-c:s', 'copy',
-                '-progress', 'pipe:1', output
-            ]
+            cmd = ['ffmpeg', '-y', '-i', video_path, '-map', '0:v:0', '-map', '0:a?', '-sn'] + v_args + a_args + ['-progress', 'pipe:1', output]
         engine_name = "COMPRESSION ENGINE"
 
     app = Client("worker_enc", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
