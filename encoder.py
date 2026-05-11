@@ -1,8 +1,20 @@
 import os, sys, time, asyncio, json, base64, shutil, traceback
+import pyrogram.utils
+import ast
+
+def patched_get_peer_type(peer_id: int) -> str:
+    val = str(peer_id)
+    if val.startswith("-100"): return "channel"
+    elif val.startswith("-"): return "chat"
+    else: return "user"
+
+pyrogram.utils.get_peer_type = patched_get_peer_type
+
+from pyrogram import Client
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import requests
 
-# ==== EMERGENCY ALERT SYSTEM ====
-# Agar GitHub me kuch bhi fail hota hai, toh ye direct Telegram ko signal bhej dega!
+# 🚨 EMERGENCY ALERT - TELEGRAM NOTIFICATION SYSTEM 🚨
 def emergency_alert(msg):
     bot_token = os.getenv("BOT_TOKEN", "")
     chat_id_str = os.getenv("CHAT_ID", "0")
@@ -15,19 +27,6 @@ def emergency_alert(msg):
         except: pass
 
 try:
-    import pyrogram.utils
-
-    def patched_get_peer_type(peer_id: int) -> str:
-        val = str(peer_id)
-        if val.startswith("-100"): return "channel"
-        elif val.startswith("-"): return "chat"
-        else: return "user"
-
-    pyrogram.utils.get_peer_type = patched_get_peer_type
-
-    from pyrogram import Client
-    from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-
     API_ID = int(os.getenv("API_ID", "0"))
     API_HASH = os.getenv("API_HASH", "")
     BOT_TOKEN = os.getenv("BOT_TOKEN", "")
@@ -53,13 +52,17 @@ try:
         if len(parts) > 3: RESOLUTION = parts[3]
         if len(parts) > 4:
             try: 
-                # 100% UNBREAKABLE DECODE
-                b64_str = parts[4]
-                pad = len(b64_str) % 4
-                if pad: b64_str += "=" * (4 - pad)
-                USER_SETTINGS = json.loads(base64.urlsafe_b64decode(b64_str).decode('utf-8'))
+                raw_set = parts[4]
+                # First try Base64 decoding
+                try:
+                    pad = len(raw_set) % 4
+                    if pad: raw_set += "=" * (4 - pad)
+                    USER_SETTINGS = json.loads(base64.urlsafe_b64decode(raw_set).decode('utf-8'))
+                except:
+                    # Fallback to string eval just in case
+                    USER_SETTINGS = ast.literal_eval(parts[4])
             except Exception as e: 
-                pass
+                emergency_alert(f"Failed to decode settings: {e}")
     else:
         DUMP_ID = raw_dump
         LOGO_ID = "none"
@@ -210,8 +213,8 @@ try:
                 a_args.extend(['-b:a', str(audio_bitrate).split()[0]])
             
             if TASK_TYPE == "hardsub":
-                # Safe Filter path
-                sub_filter = f"subtitles={sub_path}:fontsdir=fonts" if sub_path else ""
+                # Ensure path is strictly raw format inside filter without quoting issues!
+                sub_filter = f"subtitles={os.path.basename(sub_path)}:fontsdir=fonts" if sub_path else ""
 
                 if logo_path:
                     scale_val = "120:-1"
@@ -292,14 +295,17 @@ try:
                 thread = int(THREAD_ID) if THREAD_ID != "none" else None
                 cap = f"✅ {TASK_TYPE.upper()} COMPLETE\n📦 File: `{RENAME}`"
                 
-                await app.send_document(
-                    chat_id=target_chat, document=output, reply_to_message_id=thread,
-                    thumb=thumb_path if has_thumb else None, caption=cap,
-                    progress=progress_bar, progress_args=(app, msg_id, "📤 Uploading Video")
-                )
-                if target_chat != CHAT_ID:
-                    await app.send_message(CHAT_ID, f"{cap}\n\nFile successfully sent to your PM / Dump Group!")
-                await app.delete_messages(CHAT_ID, msg_id)
+                try:
+                    await app.send_document(
+                        chat_id=target_chat, document=output, reply_to_message_id=thread,
+                        thumb=thumb_path if has_thumb else None, caption=cap,
+                        progress=progress_bar, progress_args=(app, msg_id, "📤 Uploading Video")
+                    )
+                    if target_chat != CHAT_ID:
+                        await app.send_message(CHAT_ID, f"{cap}\n\nFile successfully sent to your PM / Dump Group!")
+                    await app.delete_messages(CHAT_ID, msg_id)
+                except Exception as e:
+                    await send_error_to_telegram(app, msg_id, f"Upload Error:\n{traceback.format_exc()}")
             else:
                 err_msg = "Unknown Reason"
                 if os.path.exists("ffmpeg_error.log"):
