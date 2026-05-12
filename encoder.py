@@ -199,32 +199,6 @@ try:
 
             await app.edit_message_text(CHAT_ID, msg_id, f"🔥 Starting FFmpeg Engine...\n📦 File: `{RENAME}`", reply_markup=cancel_kb)
             
-            # == SYSTEM FONT INSTALLATION (THE ULTIMATE FONT FIX) ==
-            os.makedirs("fonts", exist_ok=True)
-            try:
-                # 1. Extract all fonts embedded inside the MKV video
-                ext_proc = await asyncio.create_subprocess_exec(
-                    'ffmpeg', '-dump_attachment:t', '', '-y', '-i', os.path.abspath(video_path),
-                    cwd="fonts", stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
-                )
-                await ext_proc.wait()
-
-                # 2. Move extracted fonts to Ubuntu's System Font Directory
-                system_fonts_dir = os.path.expanduser("~/.local/share/fonts")
-                os.makedirs(system_fonts_dir, exist_ok=True)
-                
-                font_found = False
-                for f_name in os.listdir("fonts"):
-                    if f_name.lower().endswith(('.ttf', '.otf', '.ttc')):
-                        shutil.copy(os.path.join("fonts", f_name), system_fonts_dir)
-                        font_found = True
-                
-                # 3. Rebuild OS Font Cache so FFmpeg natively catches them!
-                if font_found:
-                    os.system("fc-cache -f -v")
-            except Exception as e:
-                pass # Ignore if no embedded fonts exist
-
             # == PHASE 2: ENCODE ==
             output = RENAME
             duration = await get_duration(video_path)
@@ -256,8 +230,13 @@ try:
                 a_args.extend(['-b:a', str(audio_bitrate).split()[0]])
             
             if TASK_TYPE == "hardsub":
-                # Fonts are now installed in the OS, so we don't need the buggy fontsdir parameter!
-                sub_filter = f"subtitles={sub_path}" if sub_path else ""
+                # Assuming folder is exactly named "Fonts" in your root directory
+                # Mapping the absolute path so ffmpeg doesn't get confused
+                fonts_dir = os.path.abspath("Fonts") if os.path.exists("Fonts") else os.path.abspath("fonts")
+                fonts_dir_escaped = fonts_dir.replace("\\", "/").replace(":", "\\:")
+                
+                # Single quotes directly around the path to avoid syntax crash inside the filter
+                sub_filter = f"subtitles='{sub_path}':fontsdir='{fonts_dir_escaped}'" if sub_path else ""
 
                 if logo_path:
                     scale_val = "120:-1"
