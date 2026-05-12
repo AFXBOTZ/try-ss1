@@ -1,5 +1,6 @@
 import os, sys, time, asyncio, json, base64, shutil, traceback, ast
 import urllib.request
+import re
 
 # 🚨 GUARANTEED EMERGENCY ALERT SYSTEM 🚨
 _chat_id_str = os.getenv("CHAT_ID", "0").strip()
@@ -77,7 +78,7 @@ try:
                 try: USER_SETTINGS = ast.literal_eval(parts[4])
                 except: pass
 
-    # Override keys with the Payload sent from Hugging Face
+    # Override keys with Payload from Hugging Face
     API_ID = int(USER_SETTINGS.get('__api_id', API_ID))
     API_HASH = USER_SETTINGS.get('__api_hash', API_HASH)
     BOT_TOKEN = USER_SETTINGS.get('__bot_token', BOT_TOKEN)
@@ -136,6 +137,19 @@ try:
         except:
             try: await app.send_message(CHAT_ID, f"❌ **Cloud Worker Error:**\n\n`{error_msg[-1000:]}`")
             except: pass
+
+    def get_needed_fonts(ass_file):
+        """Extracts required font names from .ass file."""
+        fonts = set()
+        try:
+            with open(ass_file, "r", encoding="utf-8") as f:
+                content = f.read()
+                # Find Style definitions: Style: Name,Fontname,FontSize...
+                styles = re.findall(r"Style:\s*[^,]+,\s*([^,]+),", content)
+                for font in styles:
+                    fonts.add(font.strip())
+        except: pass
+        return list(fonts)
 
     async def process_all():
         app = Client("worker_down", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
@@ -199,10 +213,28 @@ try:
 
             await app.edit_message_text(CHAT_ID, msg_id, f"🔥 Starting FFmpeg Engine...\n📦 File: `{RENAME}`", reply_markup=cancel_kb)
             
+            # == PRE-ENCODE: FIX FONTS DIRECTLY ON GITHUB ==
+            os.makedirs("fonts", exist_ok=True)
+            if sub_path and sub_path.endswith('.ass'):
+                needed_fonts = get_needed_fonts(sub_path)
+                for font in needed_fonts:
+                    try:
+                        f_name = font.replace(" ", "%20")
+                        dl_url = f"https://github.com/google/fonts/raw/main/ofl/{f_name.lower().replace('%20', '')}/{font.replace(' ', '')}-Regular.ttf"
+                        save_path = os.path.join("fonts", f"{font}.ttf")
+                        urllib.request.urlretrieve(dl_url, save_path)
+                    except: pass
+            
+            # Extract MKV embedded fonts if they exist
+            try:
+                cmd_font_ext = ['ffmpeg', '-dump_attachment:t', '', '-y', '-i', video_path]
+                ext_proc = await asyncio.create_subprocess_exec(*cmd_font_ext, cwd="fonts", stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+                await ext_proc.wait()
+            except: pass
+
             # == PHASE 2: ENCODE ==
             output = RENAME
             duration = await get_duration(video_path)
-            os.makedirs("fonts", exist_ok=True)
             
             crf = USER_SETTINGS.get('crf', '22')
             preset = USER_SETTINGS.get('preset', 'slow')
@@ -231,7 +263,9 @@ try:
                 a_args.extend(['-b:a', str(audio_bitrate).split()[0]])
             
             if TASK_TYPE == "hardsub":
-                sub_filter = f"subtitles={sub_path}:fontsdir=fonts" if sub_path else ""
+                # Ensure FFmpeg treats path safely and strictly parses font folder
+                f_dir = os.path.abspath("fonts").replace("\\", "/")
+                sub_filter = f"subtitles={sub_path}:fontsdir='{f_dir}'" if sub_path else ""
 
                 if logo_path:
                     scale_val = "120:-1"
