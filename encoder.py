@@ -56,7 +56,7 @@ try:
     RESOLUTION = "original"
     USER_SETTINGS = {}
 
-    DUMP_ID = _raw_dump
+    DUMP_ID = "none"
     LOGO_ID = "none"
 
     if ":::" in _raw_dump:
@@ -75,6 +75,7 @@ try:
                 try: USER_SETTINGS = ast.literal_eval(parts[4])
                 except: pass
 
+    # Override keys with the Payload sent from Hugging Face
     API_ID = int(USER_SETTINGS.get('__api_id', API_ID))
     API_HASH = USER_SETTINGS.get('__api_hash', API_HASH)
     BOT_TOKEN = USER_SETTINGS.get('__bot_token', BOT_TOKEN)
@@ -140,7 +141,7 @@ try:
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cancel_cloud_task_cloud")]])
         msg_id = None
         
-        if STATUS_MSG_ID and STATUS_MSG_ID.isdigit():
+        if STATUS_MSG_ID and str(STATUS_MSG_ID).isdigit():
             msg_id = int(STATUS_MSG_ID)
             try: await app.edit_message_text(CHAT_ID, msg_id, f"⚙️ Worker Triggered: Preparing...\n📦 File: `{RENAME}`", reply_markup=cancel_kb)
             except:
@@ -295,14 +296,14 @@ try:
                 cap = f"✅ {TASK_TYPE.upper()} COMPLETE\n📦 File: `{RENAME}`\n👤 For: {user_tag}"
                 
                 try:
-                    # Upload in Original Chat (Group/PM)
+                    # Upload in Original Chat (Group/PM) where the user sent it
                     sent = await app.send_document(
                         chat_id=CHAT_ID, document=output, reply_to_message_id=thread,
                         thumb=thumb_path if has_thumb else None, caption=cap, parse_mode=pyrogram.enums.ParseMode.MARKDOWN,
                         progress=progress_bar, progress_args=(app, msg_id, "📤 Uploading Video")
                     )
                     
-                    # Backup to Dump if specified
+                    # Backup to Dump if specified and different from the Chat ID
                     if DUMP_ID and DUMP_ID != "none" and str(DUMP_ID) != str(CHAT_ID):
                         try: await sent.copy(int(DUMP_ID))
                         except: pass
