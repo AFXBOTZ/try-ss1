@@ -37,6 +37,7 @@ try:
 
     from pyrogram import Client
     from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    import pyrogram.enums
 
     API_ID_STR = os.getenv("API_ID", "0").strip()
     API_ID = int(API_ID_STR) if API_ID_STR.isdigit() else 0
@@ -77,7 +78,6 @@ try:
     API_ID = int(USER_SETTINGS.get('__api_id', API_ID))
     API_HASH = USER_SETTINGS.get('__api_hash', API_HASH)
     BOT_TOKEN = USER_SETTINGS.get('__bot_token', BOT_TOKEN)
-    # Extraxting User Info for Mention
     USER_ID = USER_SETTINGS.get('__user_id', '0')
     USER_NAME = USER_SETTINGS.get('__user_name', 'User')
 
@@ -130,8 +130,7 @@ try:
             except: pass
 
     async def send_error_to_telegram(app, msg_id, error_msg):
-        try:
-            await app.edit_message_text(CHAT_ID, msg_id, f"❌ **Cloud Worker Error:**\n\n`{error_msg[-1000:]}`")
+        try: await app.edit_message_text(CHAT_ID, msg_id, f"❌ **Cloud Worker Error:**\n\n`{error_msg[-1000:]}`")
         except: pass
 
     async def process_all():
@@ -293,19 +292,19 @@ try:
                 
                 thread = int(THREAD_ID) if THREAD_ID != "none" else None
                 user_tag = f"[{USER_NAME}](tg://user?id={USER_ID})"
-                cap = f"✅ {TASK_TYPE.upper()} COMPLETE\n📦 File: `{RENAME}`\n👤 By: {user_tag}"
+                cap = f"✅ {TASK_TYPE.upper()} COMPLETE\n📦 File: `{RENAME}`\n👤 For: {user_tag}"
                 
                 try:
-                    # Hamesha same Chat me file jayegi jahan se bheji thi (Group ho ya DM)
-                    sent_msg = await app.send_document(
+                    # Upload in Original Chat (Group/PM)
+                    sent = await app.send_document(
                         chat_id=CHAT_ID, document=output, reply_to_message_id=thread,
                         thumb=thumb_path if has_thumb else None, caption=cap, parse_mode=pyrogram.enums.ParseMode.MARKDOWN,
                         progress=progress_bar, progress_args=(app, msg_id, "📤 Uploading Video")
                     )
                     
-                    # Agar DUMP ID set hai, toh usme chup chap ek copy chali jayegi (Backup)
+                    # Backup to Dump if specified
                     if DUMP_ID and DUMP_ID != "none" and str(DUMP_ID) != str(CHAT_ID):
-                        try: await sent_msg.copy(int(DUMP_ID))
+                        try: await sent.copy(int(DUMP_ID))
                         except: pass
                         
                     await app.delete_messages(CHAT_ID, msg_id)
