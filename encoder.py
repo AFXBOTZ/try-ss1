@@ -1,7 +1,6 @@
 import os, sys, time, asyncio, json, base64, shutil, traceback, ast
 import urllib.request
 
-# 🚨 GUARANTEED EMERGENCY ALERT SYSTEM 🚨
 _chat_id_str = os.getenv("CHAT_ID", "0").strip()
 _raw_dump = os.getenv("DUMP_ID", "none")
 _bot_token = os.getenv("BOT_TOKEN", "").strip()
@@ -29,13 +28,11 @@ def emergency_alert(msg):
 
 try:
     import pyrogram.utils
-
     def patched_get_peer_type(peer_id: int) -> str:
         val = str(peer_id)
         if val.startswith("-100"): return "channel"
         elif val.startswith("-"): return "chat"
         else: return "user"
-
     pyrogram.utils.get_peer_type = patched_get_peer_type
 
     from pyrogram import Client
@@ -77,10 +74,12 @@ try:
                 try: USER_SETTINGS = ast.literal_eval(parts[4])
                 except: pass
 
-    # Override keys with the Payload sent from Hugging Face
     API_ID = int(USER_SETTINGS.get('__api_id', API_ID))
     API_HASH = USER_SETTINGS.get('__api_hash', API_HASH)
     BOT_TOKEN = USER_SETTINGS.get('__bot_token', BOT_TOKEN)
+    # Extraxting User Info for Mention
+    USER_ID = USER_SETTINGS.get('__user_id', '0')
+    USER_NAME = USER_SETTINGS.get('__user_name', 'User')
 
     if API_ID == 0 or not API_HASH or not BOT_TOKEN:
         raise ValueError("GitHub Credentials missing! Could not retrieve API_ID or BOT_TOKEN.")
@@ -133,9 +132,7 @@ try:
     async def send_error_to_telegram(app, msg_id, error_msg):
         try:
             await app.edit_message_text(CHAT_ID, msg_id, f"❌ **Cloud Worker Error:**\n\n`{error_msg[-1000:]}`")
-        except:
-            try: await app.send_message(CHAT_ID, f"❌ **Cloud Worker Error:**\n\n`{error_msg[-1000:]}`")
-            except: pass
+        except: pass
 
     async def process_all():
         app = Client("worker_down", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
@@ -156,35 +153,20 @@ try:
 
         try:
             # == PHASE 1: DOWNLOAD ==
-            try:
-                orig_vid = await app.download_media(VIDEO_ID, progress=progress_bar, progress_args=(app, msg_id, "📥 Downloading Video"))
-                if not orig_vid:
-                    await send_error_to_telegram(app, msg_id, "Video download failed (Reference Expired). Please restart task.")
-                    await app.stop()
-                    return
-                
-                ext = os.path.splitext(orig_vid)[1]
-                video_path = f"safe_vid{ext}"
-                if os.path.exists(video_path): os.remove(video_path)
-                shutil.move(orig_vid, video_path)
-            except Exception as e:
-                await send_error_to_telegram(app, msg_id, f"Video Download Error:\n{traceback.format_exc()}")
-                await app.stop()
-                return
+            orig_vid = await app.download_media(VIDEO_ID, progress=progress_bar, progress_args=(app, msg_id, "📥 Downloading Video"))
+            ext = os.path.splitext(orig_vid)[1]
+            video_path = f"safe_vid{ext}"
+            if os.path.exists(video_path): os.remove(video_path)
+            shutil.move(orig_vid, video_path)
 
             sub_path = None
             if TASK_TYPE == "hardsub" and SUB_ID != "none":
-                try:
-                    orig_sub = await app.download_media(SUB_ID, progress=progress_bar, progress_args=(app, msg_id, "📥 Downloading Subtitle"))
-                    if orig_sub:
-                        ext = os.path.splitext(orig_sub)[1]
-                        sub_path = f"safe_sub{ext}"
-                        if os.path.exists(sub_path): os.remove(sub_path)
-                        shutil.move(orig_sub, sub_path)
-                except Exception as e:
-                    await send_error_to_telegram(app, msg_id, f"Subtitle Download Error:\n{traceback.format_exc()}")
-                    await app.stop()
-                    return
+                orig_sub = await app.download_media(SUB_ID, progress=progress_bar, progress_args=(app, msg_id, "📥 Downloading Subtitle"))
+                if orig_sub:
+                    ext = os.path.splitext(orig_sub)[1]
+                    sub_path = f"safe_sub{ext}"
+                    if os.path.exists(sub_path): os.remove(sub_path)
+                    shutil.move(orig_sub, sub_path)
                     
             logo_path = None
             if TASK_TYPE == "hardsub" and LOGO_ID != "none":
@@ -230,12 +212,8 @@ try:
                 a_args.extend(['-b:a', str(audio_bitrate).split()[0]])
             
             if TASK_TYPE == "hardsub":
-                # Assuming folder is exactly named "Fonts" in your root directory
-                # Mapping the absolute path so ffmpeg doesn't get confused
                 fonts_dir = os.path.abspath("Fonts") if os.path.exists("Fonts") else os.path.abspath("fonts")
                 fonts_dir_escaped = fonts_dir.replace("\\", "/").replace(":", "\\:")
-                
-                # Single quotes directly around the path to avoid syntax crash inside the filter
                 sub_filter = f"subtitles='{sub_path}':fontsdir='{fonts_dir_escaped}'" if sub_path else ""
 
                 if logo_path:
@@ -313,18 +291,23 @@ try:
                 
                 await app.edit_message_text(CHAT_ID, msg_id, f"▸ Processing Done! Starting Fresh Upload...\n📦 File: `{RENAME}`")
                 
-                target_chat = int(DUMP_ID) if DUMP_ID != "none" else CHAT_ID
                 thread = int(THREAD_ID) if THREAD_ID != "none" else None
-                cap = f"✅ {TASK_TYPE.upper()} COMPLETE\n📦 File: `{RENAME}`"
+                user_tag = f"[{USER_NAME}](tg://user?id={USER_ID})"
+                cap = f"✅ {TASK_TYPE.upper()} COMPLETE\n📦 File: `{RENAME}`\n👤 By: {user_tag}"
                 
                 try:
-                    await app.send_document(
-                        chat_id=target_chat, document=output, reply_to_message_id=thread,
-                        thumb=thumb_path if has_thumb else None, caption=cap,
+                    # Hamesha same Chat me file jayegi jahan se bheji thi (Group ho ya DM)
+                    sent_msg = await app.send_document(
+                        chat_id=CHAT_ID, document=output, reply_to_message_id=thread,
+                        thumb=thumb_path if has_thumb else None, caption=cap, parse_mode=pyrogram.enums.ParseMode.MARKDOWN,
                         progress=progress_bar, progress_args=(app, msg_id, "📤 Uploading Video")
                     )
-                    if target_chat != CHAT_ID:
-                        await app.send_message(CHAT_ID, f"{cap}\n\nFile successfully sent to your PM / Dump Group!")
+                    
+                    # Agar DUMP ID set hai, toh usme chup chap ek copy chali jayegi (Backup)
+                    if DUMP_ID and DUMP_ID != "none" and str(DUMP_ID) != str(CHAT_ID):
+                        try: await sent_msg.copy(int(DUMP_ID))
+                        except: pass
+                        
                     await app.delete_messages(CHAT_ID, msg_id)
                 except Exception as e:
                     await send_error_to_telegram(app, msg_id, f"Upload Error:\n{traceback.format_exc()}")
