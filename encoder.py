@@ -80,7 +80,6 @@ try:
         if len(parts) > 5:
             USER_ID = parts[5]
 
-    # Override keys with the Payload sent from Hugging Face
     API_ID = int(USER_SETTINGS.get('__api_id', API_ID))
     API_HASH = USER_SETTINGS.get('__api_hash', API_HASH)
     BOT_TOKEN = USER_SETTINGS.get('__bot_token', BOT_TOKEN)
@@ -134,11 +133,8 @@ try:
             except: pass
 
     async def send_error_to_telegram(app, msg_id, error_msg):
-        try:
-            await app.edit_message_text(CHAT_ID, msg_id, f"❌ **Cloud Worker Error:**\n\n`{error_msg[-1000:]}`")
-        except:
-            try: await app.send_message(CHAT_ID, f"❌ **Cloud Worker Error:**\n\n`{error_msg[-1000:]}`")
-            except: pass
+        try: await app.edit_message_text(CHAT_ID, msg_id, f"❌ **Cloud Worker Error:**\n\n`{error_msg[-1000:]}`")
+        except: pass
 
     async def process_all():
         app = Client("worker_down", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
@@ -161,17 +157,11 @@ try:
             # == PHASE 1: DOWNLOAD ==
             try:
                 orig_vid = await app.download_media(VIDEO_ID, progress=progress_bar, progress_args=(app, msg_id, "📥 Downloading Video"))
-                if not orig_vid:
-                    await send_error_to_telegram(app, msg_id, "Video download failed (Reference Expired). Please restart task.")
-                    await app.stop()
-                    return
-                
                 ext = os.path.splitext(orig_vid)[1]
                 video_path = f"safe_vid{ext}"
-                if os.path.exists(video_path): os.remove(video_path)
                 shutil.move(orig_vid, video_path)
             except Exception as e:
-                await send_error_to_telegram(app, msg_id, f"Video Download Error:\n{traceback.format_exc()}")
+                await send_error_to_telegram(app, msg_id, f"Video Download Error:\n{e}")
                 await app.stop()
                 return
 
@@ -180,24 +170,24 @@ try:
                 try:
                     orig_sub = await app.download_media(SUB_ID, progress=progress_bar, progress_args=(app, msg_id, "📥 Downloading Subtitle"))
                     if orig_sub:
-                        # Auto UNZIP logic with fail-safe
+                        # [THE FIX: ZIP EXTRACTOR with strict zipfile validation]
                         if orig_sub.lower().endswith('.zip') and zipfile.is_zipfile(orig_sub):
                             try:
                                 with zipfile.ZipFile(orig_sub, 'r') as zip_ref:
                                     zip_ref.extractall("temp_zip")
-                                for root, _, files in os.walk("temp_zip"):
-                                    for file in files:
-                                        if file.lower().endswith(('.ass', '.srt')):
-                                            orig_sub = os.path.join(root, file)
-                                            break
-                            except Exception as zip_e: pass
+                                for file in os.listdir("temp_zip"):
+                                    if file.lower().endswith(('.ass', '.srt')):
+                                        orig_sub = os.path.join("temp_zip", file)
+                                        break
+                            except Exception as zip_e:
+                                # if extracting zip fails, it bypasses quietly to avoid script halt
+                                pass 
                                         
                         ext = os.path.splitext(orig_sub)[1]
                         sub_path = f"safe_sub{ext}"
-                        if os.path.exists(sub_path): os.remove(sub_path)
                         shutil.move(orig_sub, sub_path)
                 except Exception as e:
-                    await send_error_to_telegram(app, msg_id, f"Subtitle Download/Unzip Error:\n{traceback.format_exc()}")
+                    await send_error_to_telegram(app, msg_id, f"Subtitle Download Error:\n{e}")
                     await app.stop()
                     return
                     
@@ -208,50 +198,38 @@ try:
                     if orig_logo:
                         ext = os.path.splitext(orig_logo)[1]
                         logo_path = f"safe_logo{ext}"
-                        if os.path.exists(logo_path): os.remove(logo_path)
                         shutil.move(orig_logo, logo_path)
                 except: pass
 
             await app.edit_message_text(CHAT_ID, msg_id, f"🔥 Starting FFmpeg Engine...\n📦 File: `{RENAME}`", reply_markup=cancel_kb)
             
-            # == PHASE 2: ENCODE PREP ==
+            # == PHASE 2: ENCODE ==
             output = RENAME
             duration = await get_duration(video_path)
             os.makedirs("fonts", exist_ok=True)
             
-            crf = USER_SETTINGS.get('crf', '22')
-            preset = USER_SETTINGS.get('preset', 'slow')
-            codec = USER_SETTINGS.get('codec', 'libx264')
-            audiocodec = USER_SETTINGS.get('audiocodec', 'copy')
+            crf = str(USER_SETTINGS.get('crf', '22')).split()[0]
+            preset = str(USER_SETTINGS.get('preset', 'slow')).split()[0]
+            codec = str(USER_SETTINGS.get('codec', 'libx264')).split()[0]
+            audiocodec = str(USER_SETTINGS.get('audiocodec', 'copy')).split()[0]
             audio_bitrate = USER_SETTINGS.get('audio')
             tune = USER_SETTINGS.get('tune')
             bit_depth = USER_SETTINGS.get('bit')
             fps = USER_SETTINGS.get('fps')
             
-            crf = str(crf).split()[0]
-            preset = str(preset).split()[0]
-            codec = str(codec).split()[0]
-            audiocodec = str(audiocodec).split()[0]
-            
-            # Force re-encode for compress mode so it doesnt clash with 'copy'
-            if TASK_TYPE == "compress" and codec == "copy":
-                codec = "libx264"
-                audiocodec = "aac"
-
             v_args = ['-c:v', codec, '-preset', preset]
             if codec != 'copy':
                 v_args.extend(['-crf', crf])
                 if tune and tune != "None": v_args.extend(['-tune', str(tune).split()[0]])
                 if bit_depth and '10bit' in str(bit_depth): v_args.extend(['-pix_fmt', 'yuv420p10le'])
                 elif bit_depth and '8bit' in str(bit_depth): v_args.extend(['-pix_fmt', 'yuv420p'])
-                else: v_args.extend(['-pix_fmt', 'yuv420p']) # Safe fallback format
+                else: v_args.extend(['-pix_fmt', 'yuv420p'])
                 if fps and fps != "Original": v_args.extend(['-r', str(fps).split()[0]])
                 
             a_args = ['-c:a', audiocodec]
             if audio_bitrate and audiocodec != 'copy':
                 a_args.extend(['-b:a', str(audio_bitrate).split()[0]])
 
-            # Dynamically grab video width to scale logo correctly without failing on main_w
             vid_w = 1280
             try:
                 cmd_w = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width', '-of', 'csv=s=x:p=0', video_path]
@@ -260,21 +238,20 @@ try:
                 if out_w: vid_w = int(out_w.decode().strip())
             except: pass
 
-            # --- WATERMARK CALCULATIONS ---
             wm_pos = USER_SETTINGS.get('wm_pos', 'tr')
             wm_size = int(USER_SETTINGS.get('wm_size', 15))
             
             logo_width = int(vid_w * (wm_size / 100.0))
-            if logo_width % 2 != 0: logo_width += 1  # FFmpeg likes Even Numbers
+            if logo_width % 2 != 0: logo_width += 1 
             scale_wm = f"{logo_width}:-1"
             
             pos_map = {
-                'tl': '10:10', 'tc': '(W-w)/2:10', 'tr': 'W-w-10:10',
-                'ml': '10:(H-h)/2', 'c': '(W-w)/2:(H-h)/2', 'mr': 'W-w-10:(H-h)/2',
-                'bl': '10:H-h-10', 'bc': '(W-w)/2:H-h-10', 'br': 'W-w-10:H-h-10'
+                'tl': '10:10', 'tc': '(main_w-overlay_w)/2:10', 'tr': 'main_w-overlay_w-10:10',
+                'ml': '10:(main_h-overlay_h)/2', 'c': '(main_w-overlay_w)/2:(main_h-overlay_h)/2', 'mr': 'main_w-overlay_w-10:(main_h-overlay_h)/2',
+                'bl': '10:main_h-overlay_h-10', 'bc': '(main_w-overlay_w)/2:main_h-overlay_h-10', 'br': 'main_w-overlay_w-10:main_h-overlay_h-10'
             }
-            pos_val = pos_map.get(wm_pos, 'W-w-10:10')
-            use_logo = True if logo_path and str(USER_SETTINGS.get('wm_status', 'ON')).upper() == 'ON' else False
+            pos_val = pos_map.get(wm_pos, 'main_w-overlay_w-10:10')
+            use_logo = True if logo_path and USER_SETTINGS.get('wm_status', 'ON') == 'ON' else False
 
             if TASK_TYPE == "hardsub":
                 fonts_dir = os.path.abspath("Fonts") if os.path.exists("Fonts") else os.path.abspath("fonts")
@@ -290,13 +267,10 @@ try:
                     else:
                         cmd = ['ffmpeg', '-y', '-i', video_path, '-map', '0:v:0', '-map', '0:a?', '-sn'] + v_args + a_args + ['-progress', 'pipe:1', output]
                 engine_name = "HARDSUB ENGINE"
-            else: # Compress Mode
+            else:
                 vf_scale = f"scale=-2:{RESOLUTION}" if RESOLUTION != "original" else ""
                 if use_logo:
-                    if vf_scale:
-                        filter_complex = f"[1:v]format=rgba,scale={scale_wm}[logo];[0:v]{vf_scale}[scaled];[scaled][logo]overlay={pos_val}:format=yuv420"
-                    else:
-                        filter_complex = f"[1:v]format=rgba,scale={scale_wm}[logo];[0:v][logo]overlay={pos_val}:format=yuv420"
+                    filter_complex = f"[1:v]format=rgba,scale={scale_wm}[logo];[0:v]{vf_scale}[scaled];[scaled][logo]overlay={pos_val}:format=yuv420" if vf_scale else f"[1:v]format=rgba,scale={scale_wm}[logo];[0:v][logo]overlay={pos_val}:format=yuv420"
                     cmd = ['ffmpeg', '-y', '-i', video_path, '-i', logo_path, '-filter_complex', filter_complex, '-map', '0:a?', '-sn'] + v_args + a_args + ['-progress', 'pipe:1', output]
                 else:
                     if vf_scale:
