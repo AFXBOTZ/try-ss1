@@ -1,6 +1,7 @@
 import os, sys, time, asyncio, json, base64, shutil, traceback, ast
 import urllib.request
 
+# 🚨 GUARANTEED EMERGENCY ALERT SYSTEM 🚨
 _chat_id_str = os.getenv("CHAT_ID", "0").strip()
 _raw_dump = os.getenv("DUMP_ID", "none")
 _bot_token = os.getenv("BOT_TOKEN", "").strip()
@@ -28,16 +29,17 @@ def emergency_alert(msg):
 
 try:
     import pyrogram.utils
+
     def patched_get_peer_type(peer_id: int) -> str:
         val = str(peer_id)
         if val.startswith("-100"): return "channel"
         elif val.startswith("-"): return "chat"
         else: return "user"
+
     pyrogram.utils.get_peer_type = patched_get_peer_type
 
     from pyrogram import Client
     from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-    import pyrogram.enums
 
     API_ID_STR = os.getenv("API_ID", "0").strip()
     API_ID = int(API_ID_STR) if API_ID_STR.isdigit() else 0
@@ -56,7 +58,7 @@ try:
     RESOLUTION = "original"
     USER_SETTINGS = {}
 
-    DUMP_ID = "none"
+    DUMP_ID = _raw_dump
     LOGO_ID = "none"
 
     if ":::" in _raw_dump:
@@ -79,8 +81,6 @@ try:
     API_ID = int(USER_SETTINGS.get('__api_id', API_ID))
     API_HASH = USER_SETTINGS.get('__api_hash', API_HASH)
     BOT_TOKEN = USER_SETTINGS.get('__bot_token', BOT_TOKEN)
-    USER_ID = USER_SETTINGS.get('__user_id', '0')
-    USER_NAME = USER_SETTINGS.get('__user_name', 'User')
 
     if API_ID == 0 or not API_HASH or not BOT_TOKEN:
         raise ValueError("GitHub Credentials missing! Could not retrieve API_ID or BOT_TOKEN.")
@@ -131,8 +131,11 @@ try:
             except: pass
 
     async def send_error_to_telegram(app, msg_id, error_msg):
-        try: await app.edit_message_text(CHAT_ID, msg_id, f"❌ **Cloud Worker Error:**\n\n`{error_msg[-1000:]}`")
-        except: pass
+        try:
+            await app.edit_message_text(CHAT_ID, msg_id, f"❌ **Cloud Worker Error:**\n\n`{error_msg[-1000:]}`")
+        except:
+            try: await app.send_message(CHAT_ID, f"❌ **Cloud Worker Error:**\n\n`{error_msg[-1000:]}`")
+            except: pass
 
     async def process_all():
         app = Client("worker_down", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
@@ -141,7 +144,7 @@ try:
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cancel_cloud_task_cloud")]])
         msg_id = None
         
-        if STATUS_MSG_ID and str(STATUS_MSG_ID).isdigit():
+        if STATUS_MSG_ID and STATUS_MSG_ID.isdigit():
             msg_id = int(STATUS_MSG_ID)
             try: await app.edit_message_text(CHAT_ID, msg_id, f"⚙️ Worker Triggered: Preparing...\n📦 File: `{RENAME}`", reply_markup=cancel_kb)
             except:
@@ -153,20 +156,35 @@ try:
 
         try:
             # == PHASE 1: DOWNLOAD ==
-            orig_vid = await app.download_media(VIDEO_ID, progress=progress_bar, progress_args=(app, msg_id, "📥 Downloading Video"))
-            ext = os.path.splitext(orig_vid)[1]
-            video_path = f"safe_vid{ext}"
-            if os.path.exists(video_path): os.remove(video_path)
-            shutil.move(orig_vid, video_path)
+            try:
+                orig_vid = await app.download_media(VIDEO_ID, progress=progress_bar, progress_args=(app, msg_id, "📥 Downloading Video"))
+                if not orig_vid:
+                    await send_error_to_telegram(app, msg_id, "Video download failed (Reference Expired). Please restart task.")
+                    await app.stop()
+                    return
+                
+                ext = os.path.splitext(orig_vid)[1]
+                video_path = f"safe_vid{ext}"
+                if os.path.exists(video_path): os.remove(video_path)
+                shutil.move(orig_vid, video_path)
+            except Exception as e:
+                await send_error_to_telegram(app, msg_id, f"Video Download Error:\n{traceback.format_exc()}")
+                await app.stop()
+                return
 
             sub_path = None
             if TASK_TYPE == "hardsub" and SUB_ID != "none":
-                orig_sub = await app.download_media(SUB_ID, progress=progress_bar, progress_args=(app, msg_id, "📥 Downloading Subtitle"))
-                if orig_sub:
-                    ext = os.path.splitext(orig_sub)[1]
-                    sub_path = f"safe_sub{ext}"
-                    if os.path.exists(sub_path): os.remove(sub_path)
-                    shutil.move(orig_sub, sub_path)
+                try:
+                    orig_sub = await app.download_media(SUB_ID, progress=progress_bar, progress_args=(app, msg_id, "📥 Downloading Subtitle"))
+                    if orig_sub:
+                        ext = os.path.splitext(orig_sub)[1]
+                        sub_path = f"safe_sub{ext}"
+                        if os.path.exists(sub_path): os.remove(sub_path)
+                        shutil.move(orig_sub, sub_path)
+                except Exception as e:
+                    await send_error_to_telegram(app, msg_id, f"Subtitle Download Error:\n{traceback.format_exc()}")
+                    await app.stop()
+                    return
                     
             logo_path = None
             if TASK_TYPE == "hardsub" and LOGO_ID != "none":
@@ -212,8 +230,12 @@ try:
                 a_args.extend(['-b:a', str(audio_bitrate).split()[0]])
             
             if TASK_TYPE == "hardsub":
+                # Assuming folder is exactly named "Fonts" in your root directory
+                # Mapping the absolute path so ffmpeg doesn't get confused
                 fonts_dir = os.path.abspath("Fonts") if os.path.exists("Fonts") else os.path.abspath("fonts")
                 fonts_dir_escaped = fonts_dir.replace("\\", "/").replace(":", "\\:")
+                
+                # Single quotes directly around the path to avoid syntax crash inside the filter
                 sub_filter = f"subtitles='{sub_path}':fontsdir='{fonts_dir_escaped}'" if sub_path else ""
 
                 if logo_path:
@@ -291,23 +313,18 @@ try:
                 
                 await app.edit_message_text(CHAT_ID, msg_id, f"▸ Processing Done! Starting Fresh Upload...\n📦 File: `{RENAME}`")
                 
+                target_chat = int(DUMP_ID) if DUMP_ID != "none" else CHAT_ID
                 thread = int(THREAD_ID) if THREAD_ID != "none" else None
-                user_tag = f"[{USER_NAME}](tg://user?id={USER_ID})"
-                cap = f"✅ {TASK_TYPE.upper()} COMPLETE\n📦 File: `{RENAME}`\n👤 For: {user_tag}"
+                cap = f"✅ {TASK_TYPE.upper()} COMPLETE\n📦 File: `{RENAME}`"
                 
                 try:
-                    # Upload in Original Chat (Group/PM) where the user sent it
-                    sent = await app.send_document(
-                        chat_id=CHAT_ID, document=output, reply_to_message_id=thread,
-                        thumb=thumb_path if has_thumb else None, caption=cap, parse_mode=pyrogram.enums.ParseMode.MARKDOWN,
+                    await app.send_document(
+                        chat_id=target_chat, document=output, reply_to_message_id=thread,
+                        thumb=thumb_path if has_thumb else None, caption=cap,
                         progress=progress_bar, progress_args=(app, msg_id, "📤 Uploading Video")
                     )
-                    
-                    # Backup to Dump if specified and different from the Chat ID
-                    if DUMP_ID and DUMP_ID != "none" and str(DUMP_ID) != str(CHAT_ID):
-                        try: await sent.copy(int(DUMP_ID))
-                        except: pass
-                        
+                    if target_chat != CHAT_ID:
+                        await app.send_message(CHAT_ID, f"{cap}\n\nFile successfully sent to your PM / Dump Group!")
                     await app.delete_messages(CHAT_ID, msg_id)
                 except Exception as e:
                     await send_error_to_telegram(app, msg_id, f"Upload Error:\n{traceback.format_exc()}")
