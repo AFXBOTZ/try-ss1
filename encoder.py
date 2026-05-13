@@ -1,5 +1,4 @@
 import os, sys, time, asyncio, json, base64, shutil, traceback, ast, zipfile
-import pyrogram.utils
 import urllib.request
 
 # 🚨 GUARANTEED EMERGENCY ALERT SYSTEM 🚨
@@ -29,6 +28,8 @@ def emergency_alert(msg):
         except: pass
 
 try:
+    import pyrogram.utils
+
     def patched_get_peer_type(peer_id: int) -> str:
         val = str(peer_id)
         if val.startswith("-100"): return "channel"
@@ -84,7 +85,7 @@ try:
     BOT_TOKEN = USER_SETTINGS.get('__bot_token', BOT_TOKEN)
 
     if API_ID == 0 or not API_HASH or not BOT_TOKEN:
-        raise ValueError("GitHub Credentials missing! API_ID or BOT_TOKEN not retrieved.")
+        raise ValueError("GitHub Credentials missing! Could not retrieve API_ID or BOT_TOKEN.")
 
     last_edit_time = 0
 
@@ -169,7 +170,6 @@ try:
                 try:
                     orig_sub = await app.download_media(SUB_ID, progress=progress_bar, progress_args=(app, msg_id, "📥 Downloading Subtitle"))
                     if orig_sub:
-                        # [THE FIX: ZIP EXTRACTOR]
                         if orig_sub.lower().endswith('.zip'):
                             with zipfile.ZipFile(orig_sub, 'r') as zip_ref:
                                 zip_ref.extractall("temp_zip")
@@ -187,7 +187,7 @@ try:
                     return
                     
             logo_path = None
-            if USER_SETTINGS.get('wm_status', 'ON') == 'ON' and LOGO_ID != "none":
+            if str(USER_SETTINGS.get('wm_status', 'ON')).upper() == 'ON' and LOGO_ID != "none":
                 try:
                     orig_logo = await app.download_media(LOGO_ID, progress=progress_bar, progress_args=(app, msg_id, "📥 Downloading Logo"))
                     if orig_logo:
@@ -204,7 +204,7 @@ try:
             os.makedirs("fonts", exist_ok=True)
             
             crf = str(USER_SETTINGS.get('crf', '22')).split()[0]
-            preset = str(USER_SETTINGS.get('preset', 'slow')).split()[0]
+            preset = str(USER_SETTINGS.get('preset', 'veryfast')).split()[0]
             codec = str(USER_SETTINGS.get('codec', 'libx264')).split()[0]
             audiocodec = str(USER_SETTINGS.get('audiocodec', 'copy')).split()[0]
             audio_bitrate = USER_SETTINGS.get('audio')
@@ -218,6 +218,7 @@ try:
                 if tune and tune != "None": v_args.extend(['-tune', str(tune).split()[0]])
                 if bit_depth and '10bit' in str(bit_depth): v_args.extend(['-pix_fmt', 'yuv420p10le'])
                 elif bit_depth and '8bit' in str(bit_depth): v_args.extend(['-pix_fmt', 'yuv420p'])
+                else: v_args.extend(['-pix_fmt', 'yuv420p']) # Safe fallback format
                 if fps and fps != "Original": v_args.extend(['-r', str(fps).split()[0]])
                 
             a_args = ['-c:a', audiocodec]
@@ -226,17 +227,30 @@ try:
 
             wm_pos = USER_SETTINGS.get('wm_pos', 'tr')
             wm_size = int(USER_SETTINGS.get('wm_size', 15))
+            
+            # Logo calculation matching the preview aspect logic
+            logo_width = int(12.8 * wm_size)
+            if logo_width % 2 != 0: logo_width += 1 
+            scale_wm = f"{logo_width}:-1"
 
-            use_logo = True if logo_path and USER_SETTINGS.get('wm_status', 'ON') == 'ON' else False
+            # 100% bug-proof position map using native FFmpeg overlay variables (W, H, w, h)
+            pos_map = {
+                'tl': '10:10', 'tc': '(W-w)/2:10', 'tr': 'W-w-10:10',
+                'ml': '10:(H-h)/2', 'c': '(W-w)/2:(H-h)/2', 'mr': 'W-w-10:(H-h)/2',
+                'bl': '10:H-h-10', 'bc': '(W-w)/2:H-h-10', 'br': 'W-w-10:H-h-10'
+            }
+            pos_val = pos_map.get(wm_pos, 'W-w-10:10')
+
+            use_logo = True if logo_path and str(USER_SETTINGS.get('wm_status', 'ON')).upper() == 'ON' else False
 
             if TASK_TYPE == "hardsub":
                 fonts_dir = os.path.abspath("Fonts") if os.path.exists("Fonts") else os.path.abspath("fonts")
                 fonts_dir_escaped = fonts_dir.replace("\\", "/").replace(":", "\\:")
-                sub_filter = f"subtitles='{sub_path}':fontsdir='{fonts_dir_escaped}'" if sub_path else ""
+                sub_filter = f"subtitles={os.path.basename(sub_path)}:fontsdir='{fonts_dir_escaped}'" if sub_path else ""
 
                 if use_logo:
-                    # [THE FIX: scale2ref crash bypass] -> simple absolute scale syntax that doesn't rely on 'main_w'
-                    filter_complex = f"[1:v]format=rgba,scale=200:-1[logo];[0:v]{sub_filter}[subbed];[subbed][logo]overlay=main_w-overlay_w-15:15" if sub_filter else f"[1:v]format=rgba,scale=200:-1[logo];[0:v][logo]overlay=main_w-overlay_w-15:15"
+                    # THE FIX: Added "format=yuv420" directly in the overlay filter to STOP CPU Drop/RGB Bug
+                    filter_complex = f"[1:v]format=rgba,scale={scale_wm}[logo];[0:v]{sub_filter}[subbed];[subbed][logo]overlay={pos_val}:format=yuv420" if sub_filter else f"[1:v]format=rgba,scale={scale_wm}[logo];[0:v][logo]overlay={pos_val}:format=yuv420"
                     cmd = ['ffmpeg', '-y', '-i', video_path, '-i', logo_path, '-filter_complex', filter_complex, '-map', '0:a?', '-sn'] + v_args + a_args + ['-progress', 'pipe:1', output]
                 else:
                     if sub_filter:
@@ -247,8 +261,8 @@ try:
             else:
                 vf_scale = f"scale=-2:{RESOLUTION}" if RESOLUTION != "original" else ""
                 if use_logo:
-                    # [THE FIX: scale2ref crash bypass for compress mode too]
-                    filter_complex = f"[1:v]format=rgba,scale=200:-1[logo];[0:v]{vf_scale}[scaled];[scaled][logo]overlay=main_w-overlay_w-15:15" if vf_scale else f"[1:v]format=rgba,scale=200:-1[logo];[0:v][logo]overlay=main_w-overlay_w-15:15"
+                    # THE FIX: format=yuv420 added for compression engine too
+                    filter_complex = f"[1:v]format=rgba,scale={scale_wm}[logo];[0:v]{vf_scale}[scaled];[scaled][logo]overlay={pos_val}:format=yuv420" if vf_scale else f"[1:v]format=rgba,scale={scale_wm}[logo];[0:v][logo]overlay={pos_val}:format=yuv420"
                     cmd = ['ffmpeg', '-y', '-i', video_path, '-i', logo_path, '-filter_complex', filter_complex, '-map', '0:a?', '-sn'] + v_args + a_args + ['-progress', 'pipe:1', output]
                 else:
                     if vf_scale:
