@@ -1,7 +1,6 @@
 import os, sys, time, asyncio, json, base64, shutil, traceback, ast
 import urllib.request
 
-# 🚨 GUARANTEED EMERGENCY ALERT SYSTEM 🚨
 _chat_id_str = os.getenv("CHAT_ID", "0").strip()
 _raw_dump = os.getenv("DUMP_ID", "none")
 _bot_token = os.getenv("BOT_TOKEN", "").strip()
@@ -60,6 +59,7 @@ try:
 
     DUMP_ID = _raw_dump
     LOGO_ID = "none"
+    USER_ID = ""
 
     if ":::" in _raw_dump:
         parts = _raw_dump.split(":::")
@@ -76,8 +76,9 @@ try:
             except:
                 try: USER_SETTINGS = ast.literal_eval(parts[4])
                 except: pass
+        if len(parts) > 5:
+            USER_ID = parts[5]
 
-    # Override keys with the Payload sent from Hugging Face
     API_ID = int(USER_SETTINGS.get('__api_id', API_ID))
     API_HASH = USER_SETTINGS.get('__api_hash', API_HASH)
     BOT_TOKEN = USER_SETTINGS.get('__bot_token', BOT_TOKEN)
@@ -144,7 +145,7 @@ try:
         cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cancel_cloud_task_cloud")]])
         msg_id = None
         
-        if STATUS_MSG_ID and STATUS_MSG_ID.isdigit():
+        if STATUS_MSG_ID and str(STATUS_MSG_ID).isdigit():
             msg_id = int(STATUS_MSG_ID)
             try: await app.edit_message_text(CHAT_ID, msg_id, f"⚙️ Worker Triggered: Preparing...\n📦 File: `{RENAME}`", reply_markup=cancel_kb)
             except:
@@ -202,6 +203,7 @@ try:
             # == PHASE 2: ENCODE ==
             output = RENAME
             duration = await get_duration(video_path)
+            os.makedirs("fonts", exist_ok=True)
             
             crf = USER_SETTINGS.get('crf', '22')
             preset = USER_SETTINGS.get('preset', 'slow')
@@ -230,12 +232,9 @@ try:
                 a_args.extend(['-b:a', str(audio_bitrate).split()[0]])
             
             if TASK_TYPE == "hardsub":
-                # Assuming folder is exactly named "Fonts" in your root directory
-                # Mapping the absolute path so ffmpeg doesn't get confused
                 fonts_dir = os.path.abspath("Fonts") if os.path.exists("Fonts") else os.path.abspath("fonts")
                 fonts_dir_escaped = fonts_dir.replace("\\", "/").replace(":", "\\:")
                 
-                # Single quotes directly around the path to avoid syntax crash inside the filter
                 sub_filter = f"subtitles='{sub_path}':fontsdir='{fonts_dir_escaped}'" if sub_path else ""
 
                 if logo_path:
@@ -315,7 +314,10 @@ try:
                 
                 target_chat = int(DUMP_ID) if DUMP_ID != "none" else CHAT_ID
                 thread = int(THREAD_ID) if THREAD_ID != "none" else None
+                
                 cap = f"✅ {TASK_TYPE.upper()} COMPLETE\n📦 File: `{RENAME}`"
+                if USER_ID:
+                    cap += f"\n👤 **Requested By:** [User](tg://user?id={USER_ID})"
                 
                 try:
                     await app.send_document(
@@ -323,8 +325,11 @@ try:
                         thumb=thumb_path if has_thumb else None, caption=cap,
                         progress=progress_bar, progress_args=(app, msg_id, "📤 Uploading Video")
                     )
+                    
                     if target_chat != CHAT_ID:
-                        await app.send_message(CHAT_ID, f"{cap}\n\nFile successfully sent to your PM / Dump Group!")
+                        tag_text = f"\n👤 [User](tg://user?id={USER_ID})" if USER_ID else ""
+                        await app.send_message(CHAT_ID, f"{cap}\n\nFile successfully sent to your Dump Group!{tag_text}")
+                        
                     await app.delete_messages(CHAT_ID, msg_id)
                 except Exception as e:
                     await send_error_to_telegram(app, msg_id, f"Upload Error:\n{traceback.format_exc()}")
