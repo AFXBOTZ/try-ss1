@@ -209,7 +209,7 @@ try:
             os.makedirs("fonts", exist_ok=True)
             
             crf = str(USER_SETTINGS.get('crf', '22')).split()[0]
-            preset = str(USER_SETTINGS.get('preset', 'slow')).split()[0]
+            preset = str(USER_SETTINGS.get('preset', 'superfast')).split()[0]
             codec = str(USER_SETTINGS.get('codec', 'libx264')).split()[0]
             audiocodec = str(USER_SETTINGS.get('audiocodec', 'copy')).split()[0]
             audio_bitrate = USER_SETTINGS.get('audio')
