@@ -1,6 +1,7 @@
 import os, sys, time, asyncio, json, base64, shutil, traceback, ast
 import urllib.request
 
+# 🚨 GUARANTEED EMERGENCY ALERT SYSTEM 🚨
 _chat_id_str = os.getenv("CHAT_ID", "0").strip()
 _raw_dump = os.getenv("DUMP_ID", "none")
 _bot_token = os.getenv("BOT_TOKEN", "").strip()
@@ -58,13 +59,11 @@ try:
     USER_SETTINGS = {}
 
     DUMP_ID = _raw_dump
-    LOGO_ID = "none"
     USER_ID = ""
 
     if ":::" in _raw_dump:
         parts = _raw_dump.split(":::")
         DUMP_ID = parts[0]
-        LOGO_ID = parts[1]
         if len(parts) > 2: STATUS_MSG_ID = parts[2]
         if len(parts) > 3: RESOLUTION = parts[3]
         if len(parts) > 4:
@@ -138,6 +137,14 @@ try:
             try: await app.send_message(CHAT_ID, f"❌ **Cloud Worker Error:**\n\n`{error_msg[-1000:]}`")
             except: pass
 
+    def get_overlay_pos(pos_str):
+        pos_map = {
+            'top-left': '10:10', 'top-center': '(main_w-overlay_w)/2:10', 'top-right': 'main_w-overlay_w-10:10',
+            'center-left': '10:(main_h-overlay_h)/2', 'center': '(main_w-overlay_w)/2:(main_h-overlay_h)/2', 'center-right': 'main_w-overlay_w-10:(main_h-overlay_h)/2',
+            'bottom-left': '10:main_h-overlay_h-10', 'bottom-center': '(main_w-overlay_w)/2:main_h-overlay_h-10', 'bottom-right': 'main_w-overlay_w-10:main_h-overlay_h-10'
+        }
+        return pos_map.get(pos_str, 'main_w-overlay_w-10:10')
+
     async def process_all():
         app = Client("worker_down", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
         await app.start()
@@ -187,10 +194,11 @@ try:
                     await app.stop()
                     return
                     
+            wm_data = USER_SETTINGS.get('watermark', {'type': 'none', 'value': '', 'pos': 'top-right', 'size': 15})
             logo_path = None
-            if TASK_TYPE == "hardsub" and LOGO_ID != "none":
+            if wm_data['type'] == 'image' and wm_data['value']:
                 try:
-                    orig_logo = await app.download_media(LOGO_ID, progress=progress_bar, progress_args=(app, msg_id, "📥 Downloading Logo"))
+                    orig_logo = await app.download_media(wm_data['value'], progress=progress_bar, progress_args=(app, msg_id, "📥 Downloading Watermark"))
                     if orig_logo:
                         ext = os.path.splitext(orig_logo)[1]
                         logo_path = f"safe_logo{ext}"
@@ -200,10 +208,26 @@ try:
 
             await app.edit_message_text(CHAT_ID, msg_id, f"🔥 Starting FFmpeg Engine...\n📦 File: `{RENAME}`", reply_markup=cancel_kb)
             
+            os.makedirs("fonts", exist_ok=True)
+            try:
+                ext_proc = await asyncio.create_subprocess_exec(
+                    'ffmpeg', '-dump_attachment:t', '', '-y', '-i', os.path.abspath(video_path),
+                    cwd="fonts", stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+                )
+                await ext_proc.wait()
+                system_fonts_dir = os.path.expanduser("~/.local/share/fonts")
+                os.makedirs(system_fonts_dir, exist_ok=True)
+                font_found = False
+                for f_name in os.listdir("fonts"):
+                    if f_name.lower().endswith(('.ttf', '.otf', '.ttc')):
+                        shutil.copy(os.path.join("fonts", f_name), system_fonts_dir)
+                        font_found = True
+                if font_found: os.system("fc-cache -f -v")
+            except: pass
+
             # == PHASE 2: ENCODE ==
             output = RENAME
             duration = await get_duration(video_path)
-            os.makedirs("fonts", exist_ok=True)
             
             crf = USER_SETTINGS.get('crf', '22')
             preset = USER_SETTINGS.get('preset', 'slow')
@@ -230,31 +254,48 @@ try:
             a_args = ['-c:a', audiocodec]
             if audio_bitrate and audiocodec != 'copy':
                 a_args.extend(['-b:a', str(audio_bitrate).split()[0]])
-            
-            if TASK_TYPE == "hardsub":
-                fonts_dir = os.path.abspath("Fonts") if os.path.exists("Fonts") else os.path.abspath("fonts")
-                fonts_dir_escaped = fonts_dir.replace("\\", "/").replace(":", "\\:")
-                
-                sub_filter = f"subtitles='{sub_path}':fontsdir='{fonts_dir_escaped}'" if sub_path else ""
 
-                if logo_path:
-                    scale_val = "120:-1"
-                    pos_val = "main_w-overlay_w-15:15"
-                    filter_complex = f"[1:v]scale={scale_val}[logo];[0:v]{sub_filter}[subbed];[subbed][logo]overlay={pos_val}" if sub_filter else f"[1:v]scale={scale_val}[logo];[0:v][logo]overlay={pos_val}"
-                    cmd = ['ffmpeg', '-y', '-i', video_path, '-i', logo_path, '-filter_complex', filter_complex, '-map', '0:a?', '-sn'] + v_args + a_args + ['-progress', 'pipe:1', output]
-                else:
-                    if sub_filter:
-                        cmd = ['ffmpeg', '-y', '-i', video_path, '-map', '0:v:0', '-map', '0:a?', '-sn', '-vf', sub_filter] + v_args + a_args + ['-progress', 'pipe:1', output]
-                    else:
-                        cmd = ['ffmpeg', '-y', '-i', video_path, '-map', '0:v:0', '-map', '0:a?', '-sn'] + v_args + a_args + ['-progress', 'pipe:1', output]
-                engine_name = "HARDSUB ENGINE"
+            # ==== SMART FFMPEG FILTER BUILDER ====
+            vf_filters = []
+            filter_complex = ""
+            input_files = ['-i', video_path]
+            
+            if RESOLUTION != "original":
+                vf_filters.append(f"scale=-2:{RESOLUTION}")
+
+            # 1. Subtitle Filter
+            if TASK_TYPE == "hardsub" and sub_path:
+                vf_filters.append(f"subtitles={os.path.basename(sub_path)}")
+
+            # 2. Watermark Filter
+            if wm_data['type'] == 'text' and wm_data['value']:
+                safe_text = wm_data['value'].replace("'", "\\'").replace(":", "\\:")
+                x_y = get_overlay_pos(wm_data['pos']).replace('main_w', 'w').replace('main_h', 'h').replace('overlay_w', 'tw').replace('overlay_h', 'th')
+                f_size = int(wm_data['size']) * 2
+                vf_filters.append(f"drawtext=text='{safe_text}':fontsize={f_size}:fontcolor=white@0.8:x={x_y}")
+            
+            elif wm_data['type'] == 'image' and logo_path:
+                input_files.extend(['-i', logo_path])
+                scale_val = f"iw*{int(wm_data['size'])/100}:-1"
+                pos_val = get_overlay_pos(wm_data['pos'])
+                
+                v_stream = "0:v"
+                if vf_filters:
+                    v_stream = "[base]"
+                    filter_complex = f"[0:v]{','.join(vf_filters)}[base]; "
+                    vf_filters = [] # Clear vf since we are using filter_complex
+                
+                filter_complex += f"[1:v]scale={scale_val}[logo]; {v_stream}[logo]overlay={pos_val}"
+
+            # Combine filters
+            if filter_complex:
+                cmd = ['ffmpeg', '-y'] + input_files + ['-filter_complex', filter_complex, '-map', '0:a?', '-sn'] + v_args + a_args + ['-progress', 'pipe:1', output]
+            elif vf_filters:
+                cmd = ['ffmpeg', '-y'] + input_files + ['-map', '0:v:0', '-map', '0:a?', '-sn', '-vf', ','.join(vf_filters)] + v_args + a_args + ['-progress', 'pipe:1', output]
             else:
-                if RESOLUTION != "original":
-                    vf_scale = f"scale=-2:{RESOLUTION}"
-                    cmd = ['ffmpeg', '-y', '-i', video_path, '-map', '0:v:0', '-map', '0:a?', '-sn', '-vf', vf_scale] + v_args + a_args + ['-progress', 'pipe:1', output]
-                else:
-                    cmd = ['ffmpeg', '-y', '-i', video_path, '-map', '0:v:0', '-map', '0:a?', '-sn'] + v_args + a_args + ['-progress', 'pipe:1', output]
-                engine_name = "COMPRESSION ENGINE"
+                cmd = ['ffmpeg', '-y'] + input_files + ['-map', '0:v:0', '-map', '0:a?', '-sn'] + v_args + a_args + ['-progress', 'pipe:1', output]
+
+            engine_name = "HARDSUB ENGINE" if TASK_TYPE == "hardsub" else "COMPRESSION ENGINE"
 
             with open("ffmpeg_error.log", "w") as err_file:
                 proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=err_file)
