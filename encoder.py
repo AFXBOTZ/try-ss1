@@ -1,7 +1,6 @@
 import os, sys, time, asyncio, json, base64, shutil, traceback, ast
 import urllib.request
 
-# 🚨 GUARANTEED EMERGENCY ALERT SYSTEM 🚨
 _chat_id_str = os.getenv("CHAT_ID", "0").strip()
 _raw_dump = os.getenv("DUMP_ID", "none")
 _bot_token = os.getenv("BOT_TOKEN", "").strip()
@@ -186,9 +185,14 @@ try:
                     await send_error_to_telegram(app, msg_id, f"Subtitle Download Error:\n{traceback.format_exc()}")
                     await app.stop()
                     return
-                    
+            
+            # --- NEW WATERMARK LOGIC ---
             logo_path = None
-            if LOGO_ID != "none":
+            wm_status = USER_SETTINGS.get('wm_status', 'ON')
+            wm_pos = USER_SETTINGS.get('wm_pos', 'tr')
+            wm_size = int(USER_SETTINGS.get('wm_size', 15))
+            
+            if LOGO_ID != "none" and wm_status == "ON":
                 try:
                     orig_logo = await app.download_media(LOGO_ID, progress=progress_bar, progress_args=(app, msg_id, "📥 Downloading Logo"))
                     if orig_logo:
@@ -230,52 +234,60 @@ try:
             if audio_bitrate and audiocodec != 'copy':
                 a_args.extend(['-b:a', str(audio_bitrate).split()[0]])
             
-            wm_pos = USER_SETTINGS.get('wm_pos', 'tr')
-            wm_size = int(USER_SETTINGS.get('wm_size', 15))
+            # Subtitle Filter
+            fonts_dir = os.path.abspath("Fonts") if os.path.exists("Fonts") else os.path.abspath("fonts")
+            fonts_dir_escaped = fonts_dir.replace("\\", "/").replace(":", "\\:")
+            sub_filter = f"subtitles='{sub_path}':fontsdir='{fonts_dir_escaped}'" if sub_path else ""
+
+            # Scale Filter
+            vf_scale = ""
+            if RESOLUTION != "original":
+                vf_scale = f"scale=-2:{RESOLUTION}"
+
+            # --- FILTER COMPLEX CONSTRUCTION ---
+            filter_complex = ""
+            if logo_path:
+                scale_val = f"{wm_size * 10}:-1"
+                pos_map = {
+                    'tl': '10:10', 'tc': '(main_w-overlay_w)/2:10', 'tr': 'main_w-overlay_w-10:10',
+                    'cl': '10:(main_h-overlay_h)/2', 'cc': '(main_w-overlay_w)/2:(main_h-overlay_h)/2', 'cr': 'main_w-overlay_w-10:(main_h-overlay_h)/2',
+                    'bl': '10:main_h-overlay_h-10', 'bc': '(main_w-overlay_w)/2:main_h-overlay_h-10', 'br': 'main_w-overlay_w-10:main_h-overlay_h-10'
+                }
+                pos_val = pos_map.get(wm_pos, 'main_w-overlay_w-10:10')
+                
+                parts = []
+                # Step 1: Scale logo
+                parts.append(f"[1:v]scale={scale_val}[logo]")
+                last_v = "[0:v]"
+                
+                # Step 2: Apply resolution scale if needed
+                if vf_scale:
+                    parts.append(f"{last_v}{vf_scale}[scaled]")
+                    last_v = "[scaled]"
+                
+                # Step 3: Apply Subtitle if needed
+                if sub_filter:
+                    parts.append(f"{last_v}{sub_filter}[subbed]")
+                    last_v = "[subbed]"
+                
+                # Step 4: Apply Overlay
+                parts.append(f"{last_v}[logo]overlay={pos_val}")
+                filter_complex = ";".join(parts)
+                
+                cmd = ['ffmpeg', '-y', '-i', video_path, '-i', logo_path, '-filter_complex', filter_complex, '-map', '0:a?', '-sn'] + v_args + a_args + ['-progress', 'pipe:1', output]
             
-            scale_logo = f"iw*({wm_size}/100):-1"
-            pos_dict = {
-                "tl": "15:15",
-                "tc": "(main_w-overlay_w)/2:15",
-                "tr": "main_w-overlay_w-15:15",
-                "ml": "15:(main_h-overlay_h)/2",
-                "mc": "(main_w-overlay_w)/2:(main_h-overlay_h)/2",
-                "mr": "main_w-overlay_w-15:(main_h-overlay_h)/2",
-                "bl": "15:main_h-overlay_h-15",
-                "bc": "(main_w-overlay_w)/2:main_h-overlay_h-15",
-                "br": "main_w-overlay_w-15:main_h-overlay_h-15"
-            }
-            pos_val = pos_dict.get(wm_pos, "main_w-overlay_w-15:15")
-
-            if TASK_TYPE == "hardsub":
-                fonts_dir = os.path.abspath("Fonts") if os.path.exists("Fonts") else os.path.abspath("fonts")
-                fonts_dir_escaped = fonts_dir.replace("\\", "/").replace(":", "\\:")
-                sub_filter = f"subtitles='{sub_path}':fontsdir='{fonts_dir_escaped}'" if sub_path else ""
-
-                if logo_path:
-                    filter_complex = f"[1:v]scale={scale_logo}[logo];[0:v]{sub_filter}[subbed];[subbed][logo]overlay={pos_val}" if sub_filter else f"[1:v]scale={scale_logo}[logo];[0:v][logo]overlay={pos_val}"
-                    cmd = ['ffmpeg', '-y', '-i', video_path, '-i', logo_path, '-filter_complex', filter_complex, '-map', '0:a?', '-sn'] + v_args + a_args + ['-progress', 'pipe:1', output]
-                else:
-                    if sub_filter:
-                        cmd = ['ffmpeg', '-y', '-i', video_path, '-map', '0:v:0', '-map', '0:a?', '-sn', '-vf', sub_filter] + v_args + a_args + ['-progress', 'pipe:1', output]
-                    else:
-                        cmd = ['ffmpeg', '-y', '-i', video_path, '-map', '0:v:0', '-map', '0:a?', '-sn'] + v_args + a_args + ['-progress', 'pipe:1', output]
-                engine_name = "HARDSUB ENGINE"
             else:
-                vf_filters = []
-                if RESOLUTION != "original":
-                    vf_filters.append(f"scale=-2:{RESOLUTION}")
-                    
-                if logo_path:
-                    filter_complex = f"[1:v]scale={scale_logo}[logo];[0:v][logo]overlay={pos_val}"
-                    if vf_filters: filter_complex = f"{filter_complex},{','.join(vf_filters)}"
-                    cmd = ['ffmpeg', '-y', '-i', video_path, '-i', logo_path, '-filter_complex', filter_complex, '-map', '0:a?', '-sn'] + v_args + a_args + ['-progress', 'pipe:1', output]
+                # No Logo, Just Subtitle and/or Scale
+                vf_parts = []
+                if vf_scale: vf_parts.append(vf_scale)
+                if sub_filter: vf_parts.append(sub_filter)
+                
+                if vf_parts:
+                    cmd = ['ffmpeg', '-y', '-i', video_path, '-map', '0:v:0', '-map', '0:a?', '-sn', '-vf', ",".join(vf_parts)] + v_args + a_args + ['-progress', 'pipe:1', output]
                 else:
-                    if vf_filters:
-                        cmd = ['ffmpeg', '-y', '-i', video_path, '-map', '0:v:0', '-map', '0:a?', '-sn', '-vf', ','.join(vf_filters)] + v_args + a_args + ['-progress', 'pipe:1', output]
-                    else:
-                        cmd = ['ffmpeg', '-y', '-i', video_path, '-map', '0:v:0', '-map', '0:a?', '-sn'] + v_args + a_args + ['-progress', 'pipe:1', output]
-                engine_name = "COMPRESSION ENGINE"
+                    cmd = ['ffmpeg', '-y', '-i', video_path, '-map', '0:v:0', '-map', '0:a?', '-sn'] + v_args + a_args + ['-progress', 'pipe:1', output]
+
+            engine_name = "HARDSUB ENGINE" if TASK_TYPE == "hardsub" else "COMPRESSION ENGINE"
 
             with open("ffmpeg_error.log", "w") as err_file:
                 proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=err_file)
