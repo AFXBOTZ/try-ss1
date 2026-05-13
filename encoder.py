@@ -170,14 +170,19 @@ try:
                 try:
                     orig_sub = await app.download_media(SUB_ID, progress=progress_bar, progress_args=(app, msg_id, "📥 Downloading Subtitle"))
                     if orig_sub:
-                        if orig_sub.lower().endswith('.zip'):
-                            with zipfile.ZipFile(orig_sub, 'r') as zip_ref:
-                                zip_ref.extractall("temp_zip")
-                            for file in os.listdir("temp_zip"):
-                                if file.lower().endswith(('.ass', '.srt')):
-                                    orig_sub = os.path.join("temp_zip", file)
-                                    break
-                                    
+                        # [THE FIX: ZIP EXTRACTOR with strict zipfile validation]
+                        if orig_sub.lower().endswith('.zip') and zipfile.is_zipfile(orig_sub):
+                            try:
+                                with zipfile.ZipFile(orig_sub, 'r') as zip_ref:
+                                    zip_ref.extractall("temp_zip")
+                                for file in os.listdir("temp_zip"):
+                                    if file.lower().endswith(('.ass', '.srt')):
+                                        orig_sub = os.path.join("temp_zip", file)
+                                        break
+                            except Exception as zip_e:
+                                # if extracting zip fails, it bypasses quietly to avoid script halt
+                                pass 
+                                        
                         ext = os.path.splitext(orig_sub)[1]
                         sub_path = f"safe_sub{ext}"
                         shutil.move(orig_sub, sub_path)
@@ -187,7 +192,7 @@ try:
                     return
                     
             logo_path = None
-            if str(USER_SETTINGS.get('wm_status', 'ON')).upper() == 'ON' and LOGO_ID != "none":
+            if USER_SETTINGS.get('wm_status', 'ON') == 'ON' and LOGO_ID != "none":
                 try:
                     orig_logo = await app.download_media(LOGO_ID, progress=progress_bar, progress_args=(app, msg_id, "📥 Downloading Logo"))
                     if orig_logo:
@@ -204,7 +209,7 @@ try:
             os.makedirs("fonts", exist_ok=True)
             
             crf = str(USER_SETTINGS.get('crf', '22')).split()[0]
-            preset = str(USER_SETTINGS.get('preset', 'veryfast')).split()[0]
+            preset = str(USER_SETTINGS.get('preset', 'slow')).split()[0]
             codec = str(USER_SETTINGS.get('codec', 'libx264')).split()[0]
             audiocodec = str(USER_SETTINGS.get('audiocodec', 'copy')).split()[0]
             audio_bitrate = USER_SETTINGS.get('audio')
@@ -218,30 +223,35 @@ try:
                 if tune and tune != "None": v_args.extend(['-tune', str(tune).split()[0]])
                 if bit_depth and '10bit' in str(bit_depth): v_args.extend(['-pix_fmt', 'yuv420p10le'])
                 elif bit_depth and '8bit' in str(bit_depth): v_args.extend(['-pix_fmt', 'yuv420p'])
-                else: v_args.extend(['-pix_fmt', 'yuv420p']) # Safe fallback format
+                else: v_args.extend(['-pix_fmt', 'yuv420p'])
                 if fps and fps != "Original": v_args.extend(['-r', str(fps).split()[0]])
                 
             a_args = ['-c:a', audiocodec]
             if audio_bitrate and audiocodec != 'copy':
                 a_args.extend(['-b:a', str(audio_bitrate).split()[0]])
 
+            vid_w = 1280
+            try:
+                cmd_w = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width', '-of', 'csv=s=x:p=0', video_path]
+                p_w = await asyncio.create_subprocess_exec(*cmd_w, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+                out_w, _ = await p_w.communicate()
+                if out_w: vid_w = int(out_w.decode().strip())
+            except: pass
+
             wm_pos = USER_SETTINGS.get('wm_pos', 'tr')
             wm_size = int(USER_SETTINGS.get('wm_size', 15))
             
-            # Logo calculation matching the preview aspect logic
-            logo_width = int(12.8 * wm_size)
+            logo_width = int(vid_w * (wm_size / 100.0))
             if logo_width % 2 != 0: logo_width += 1 
             scale_wm = f"{logo_width}:-1"
-
-            # 100% bug-proof position map using native FFmpeg overlay variables (W, H, w, h)
+            
             pos_map = {
-                'tl': '10:10', 'tc': '(W-w)/2:10', 'tr': 'W-w-10:10',
-                'ml': '10:(H-h)/2', 'c': '(W-w)/2:(H-h)/2', 'mr': 'W-w-10:(H-h)/2',
-                'bl': '10:H-h-10', 'bc': '(W-w)/2:H-h-10', 'br': 'W-w-10:H-h-10'
+                'tl': '10:10', 'tc': '(main_w-overlay_w)/2:10', 'tr': 'main_w-overlay_w-10:10',
+                'ml': '10:(main_h-overlay_h)/2', 'c': '(main_w-overlay_w)/2:(main_h-overlay_h)/2', 'mr': 'main_w-overlay_w-10:(main_h-overlay_h)/2',
+                'bl': '10:main_h-overlay_h-10', 'bc': '(main_w-overlay_w)/2:main_h-overlay_h-10', 'br': 'main_w-overlay_w-10:main_h-overlay_h-10'
             }
-            pos_val = pos_map.get(wm_pos, 'W-w-10:10')
-
-            use_logo = True if logo_path and str(USER_SETTINGS.get('wm_status', 'ON')).upper() == 'ON' else False
+            pos_val = pos_map.get(wm_pos, 'main_w-overlay_w-10:10')
+            use_logo = True if logo_path and USER_SETTINGS.get('wm_status', 'ON') == 'ON' else False
 
             if TASK_TYPE == "hardsub":
                 fonts_dir = os.path.abspath("Fonts") if os.path.exists("Fonts") else os.path.abspath("fonts")
@@ -249,7 +259,6 @@ try:
                 sub_filter = f"subtitles={os.path.basename(sub_path)}:fontsdir='{fonts_dir_escaped}'" if sub_path else ""
 
                 if use_logo:
-                    # THE FIX: Added "format=yuv420" directly in the overlay filter to STOP CPU Drop/RGB Bug
                     filter_complex = f"[1:v]format=rgba,scale={scale_wm}[logo];[0:v]{sub_filter}[subbed];[subbed][logo]overlay={pos_val}:format=yuv420" if sub_filter else f"[1:v]format=rgba,scale={scale_wm}[logo];[0:v][logo]overlay={pos_val}:format=yuv420"
                     cmd = ['ffmpeg', '-y', '-i', video_path, '-i', logo_path, '-filter_complex', filter_complex, '-map', '0:a?', '-sn'] + v_args + a_args + ['-progress', 'pipe:1', output]
                 else:
@@ -261,7 +270,6 @@ try:
             else:
                 vf_scale = f"scale=-2:{RESOLUTION}" if RESOLUTION != "original" else ""
                 if use_logo:
-                    # THE FIX: format=yuv420 added for compression engine too
                     filter_complex = f"[1:v]format=rgba,scale={scale_wm}[logo];[0:v]{vf_scale}[scaled];[scaled][logo]overlay={pos_val}:format=yuv420" if vf_scale else f"[1:v]format=rgba,scale={scale_wm}[logo];[0:v][logo]overlay={pos_val}:format=yuv420"
                     cmd = ['ffmpeg', '-y', '-i', video_path, '-i', logo_path, '-filter_complex', filter_complex, '-map', '0:a?', '-sn'] + v_args + a_args + ['-progress', 'pipe:1', output]
                 else:
